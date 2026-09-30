@@ -1,4 +1,4 @@
-name: Lint
+name: Test
 
 on:
   push:
@@ -8,16 +8,33 @@ on:
   workflow_call:
 
 concurrency:
-  group: lint-${{ github.workflow }}-${{ github.ref }}
+  group: test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   backend:
-    name: Backend (ruff)
+    name: Backend (pytest)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
+    # The tests create and drop their own peach_test database on this server.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: peach
+          POSTGRES_PASSWORD: peach
+          POSTGRES_DB: peach
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U peach -d peach"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://peach:peach@localhost:5432/peach
     steps:
       - uses: actions/checkout@v4
 
@@ -33,14 +50,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
-      - name: ruff check
-        run: uv run ruff check --output-format=github .
-
-      - name: ruff format --check
-        run: uv run ruff format --check --diff .
+      - name: pytest
+        run: uv run pytest
 
   frontend:
-    name: Frontend (eslint + prettier)
+    name: Frontend (vitest)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -61,16 +75,5 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: eslint
-        run: pnpm lint
-
-      - name: prettier --check
-        run: pnpm format:check
-
-      # LayoutProps/PageProps are generated into .next/types, which a fresh
-      # checkout lacks; generate them without a full build.
-      - name: next typegen
-        run: pnpm exec next typegen
-
-      - name: tsc --noEmit
-        run: pnpm exec tsc --noEmit
+      - name: vitest
+        run: pnpm test

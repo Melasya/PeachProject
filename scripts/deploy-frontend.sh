@@ -7,6 +7,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Git Bash: aws.exe cannot open /c/... paths; C:/... works for it and for bash.
+command -v cygpath >/dev/null 2>&1 && ROOT="$(cygpath -m "${ROOT}")"
 TEMPLATE="${ROOT}/infra/frontend.yaml"
 APP="${ROOT}/frontend"
 

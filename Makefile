@@ -51,10 +51,10 @@ shell-backend: ## Shell into the backend container
 shell-db: ## psql into the database
 	$(COMPOSE) exec db psql -U $${POSTGRES_USER:-peach} -d $${POSTGRES_DB:-peach}
 
-deploy-backend: ## Build + push the image, roll the Lambda (function URL + Aurora), migrate, write BACKEND_URL to .env
+deploy-backend: ## Build + push the image, roll the Lambda (function URL + RDS PostgreSQL), migrate, write BACKEND_URL to .env
 	./scripts/deploy-backend.sh
 
-destroy-backend: ## Delete the backend stack, Aurora cluster included
+destroy-backend: ## Delete the backend stack, RDS database included
 	./scripts/destroy-backend.sh
 
 logs-backend: ## Tail the deployed backend's CloudWatch logs

@@ -4,6 +4,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Git Bash: aws.exe cannot open /c/... paths; C:/... works for it and for bash.
+command -v cygpath >/dev/null 2>&1 && ROOT="$(cygpath -m "${ROOT}")"
 TEMPLATE="${ROOT}/infra/github-oidc.yaml"
 
 log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
@@ -97,7 +99,7 @@ if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   gh variable set AWS_DEPLOY_ROLE_ARN --repo "${REPO}" --body "${ROLE_ARN}"
   gh variable set AWS_REGION --repo "${REPO}" --body "${AWS_REGION}"
   echo
-  echo "  Done. Write \"deploy\" in a commit message on main and the backend ships."
+  echo "  Done. Every push to main now lints, tests and deploys (.github/workflows/deploy.yml)."
 else
   echo
   echo "  gh is not installed or not logged in. Set these two repository"

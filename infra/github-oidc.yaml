@@ -209,6 +209,69 @@ Resources:
                   - logs:TagResource
                 Resource: "*"
 
+        # make deploy-frontend: the private site bucket, and the CloudFront
+        # distribution in front of it. No s3:PutBucketAcl or public-access
+        # changes beyond what the template sets (all public access blocked).
+        - PolicyName: deploy-frontend
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: SiteBucket
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketLocation
+                  - s3:GetBucketOwnershipControls
+                  - s3:GetBucketPolicy
+                  - s3:GetBucketPublicAccessBlock
+                  - s3:GetBucketTagging
+                  - s3:GetEncryptionConfiguration
+                  - s3:ListBucket
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:PutEncryptionConfiguration
+                Resource: !Sub "arn:aws:s3:::${ProjectName}-frontend-*"
+
+              - Sid: SiteObjects
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${ProjectName}-frontend-*/*"
+
+              # Distribution, origin access control and CloudFront Function IDs
+              # are random, and several of these calls accept no resource ARN.
+              - Sid: Cdn
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateDistribution
+                  - cloudfront:CreateFunction
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:CreateOriginAccessControl
+                  - cloudfront:DeleteDistribution
+                  - cloudfront:DeleteFunction
+                  - cloudfront:DeleteOriginAccessControl
+                  - cloudfront:DescribeFunction
+                  - cloudfront:GetDistribution
+                  - cloudfront:GetDistributionConfig
+                  - cloudfront:GetFunction
+                  - cloudfront:GetInvalidation
+                  - cloudfront:GetOriginAccessControl
+                  - cloudfront:GetOriginAccessControlConfig
+                  - cloudfront:ListTagsForResource
+                  - cloudfront:PublishFunction
+                  - cloudfront:TagResource
+                  - cloudfront:UntagResource
+                  - cloudfront:UpdateDistribution
+                  - cloudfront:UpdateFunction
+                  - cloudfront:UpdateOriginAccessControl
+                Resource: "*"
+
 Outputs:
   RoleArn:
     Description: Set this as the AWS_DEPLOY_ROLE_ARN repository variable.

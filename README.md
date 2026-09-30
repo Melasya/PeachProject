@@ -69,10 +69,11 @@ Peach/
 │
 ├── .github/workflows/
 │   ├── lint.yml                  # ruff + eslint on every push
-│   └── deploy-backend.yml        # ships when a commit message says "deploy"
+│   ├── test.yml                  # pytest (with Postgres) + vitest on every push
+│   └── deploy.yml                # push to main: lint + test, then deploy backend + frontend
 │
 ├── infra/
-│   ├── backend.yaml              # CloudFormation: Lambda + function URL + Aurora Serverless v2
+│   ├── backend.yaml              # CloudFormation: Lambda + function URL + RDS PostgreSQL
 │   ├── frontend.yaml             # CloudFormation: S3 + CloudFront (+ optional custom domain)
 │   └── github-oidc.yaml          # CloudFormation: the role Actions assumes
 │
@@ -364,7 +365,7 @@ make destroy-backend     # delete everything, database included
 `infra/backend.yaml` is the whole architecture in one CloudFormation stack:
 
 ```
-internet -> Lambda function URL (HTTPS) -> Lambda (FastAPI via Mangum, in the VPC) -> Aurora Serverless v2 :5432
+internet -> Lambda function URL (HTTPS) -> Lambda (FastAPI via Mangum, in the VPC) -> RDS PostgreSQL :5432
 ```
 
 `scripts/deploy-backend.sh` drives it, in order:
@@ -381,16 +382,17 @@ internet -> Lambda function URL (HTTPS) -> Lambda (FastAPI via Mangum, in the VP
 **Before the first run** put your credentials in `.env` (`AWS_PROFILE` works instead of static
 keys). Everything else is optional: left blank, the script uses the default VPC and its subnets,
 skipping AZs Lambda cannot use (`use1-az3`). The first deploy takes about ten minutes, almost all
-of it Aurora.
+of it the database.
 
-**Aurora scales to zero.** The cluster runs Aurora PostgreSQL 17.4 on one `db.serverless` instance
-with `MinCapacity: 0`: after `DB_SECONDS_UNTIL_AUTO_PAUSE` (300 s) without connections it pauses and
-bills only storage. The first request after a pause waits ~15 s while it resumes, well inside the
-function's 30 s timeout. For it to pause at all nothing may hold a connection, so on Lambda the app
-runs with `DB_POOLING=false` (SQLAlchemy `NullPool`): each request opens and closes its own
-connection instead of a warm environment keeping one open.
+**One small RDS instance, not Aurora.** AWS Free Plan accounts cannot create Aurora clusters
+through CloudFormation (it demands an "express configuration" that CloudFormation does not expose
+and that drops VPC networking for IAM-only auth), so the database is RDS for PostgreSQL 17 on a
+single-AZ `db.t4g.micro` with 20 GB of gp2 - the free-tier instance class. It does not pause, so
+it runs around the clock. On Lambda the app runs with `DB_POOLING=false` (SQLAlchemy `NullPool`):
+each request opens and closes its own connection, so warm environments never pile up idle
+connections on the micro instance.
 
-**No NAT gateway.** The function sits in the VPC only to reach Aurora and needs nothing from the
+**No NAT gateway.** The function sits in the VPC only to reach the database and needs nothing from the
 internet, so the default subnets do. The flip side is that it cannot reach Secrets Manager, so
 the connection string comes in as the `DATABASE_URL` environment variable. The password is
 generated on the first deploy, kept in the `peach/backend/database-url` secret, and read back
@@ -404,7 +406,7 @@ from there on later deploys rather than rotated.
 | | Idle | Per use |
 |---|---|---|
 | Lambda (512 MB, arm64) | $0 | free tier: 1M requests + 400k GB-s a month |
-| Aurora Serverless v2 | storage only, ~$0.10/GB-month | ~$0.12 per ACU-hour while awake (max 1 ACU) |
+| RDS PostgreSQL (`db.t4g.micro`, 20 GB gp2) | free-tier hours, else ~$12/month + ~$2.30/month storage | — |
 | Secrets Manager (one secret) | $0.40 | — |
 | ECR, CloudWatch Logs | ~$0 at this size | — |
 
@@ -489,18 +491,16 @@ distribution in the console; there is no API for it yet.
 make github-role      # once: create the role Actions assumes
 ```
 
-Then write the word **deploy** in a commit message on `main`:
+Then every push to `main` deploys:
 
 ```bash
-git commit -m "tighten the items query, deploy"
 git push
 ```
 
-`.github/workflows/deploy-backend.yml` picks that up and runs `make deploy-backend` on a runner.
-Ordinary commits to `main` do nothing, so the expensive path stays opt-in. The workflow also has a
-`workflow_dispatch` trigger, so it can be run by hand from the Actions tab without any magic word.
-Matching is case-insensitive — GitHub compares strings that way — so `Deploy` and `redeployed`
-count too.
+`.github/workflows/deploy.yml` first runs the lint and test workflows (`lint.yml`, `test.yml`,
+called as reusable workflows), and only if both pass runs `make deploy-backend` and then
+`make deploy-frontend` on a runner - the same Makefile targets as a local deploy, so there is one
+deployment recipe. It also has a `workflow_dispatch` trigger for a manual run from the Actions tab.
 
 **No access key is involved.** `make github-role` creates a stack holding an IAM role and, if the
 account does not already have one, the GitHub OIDC provider. The workflow asks GitHub for a
@@ -536,7 +536,9 @@ the workflow sets up QEMU and buildx pushes the cross-architecture image straigh
 than loading it into the local daemon. Switching the job to a `ubuntu-24.04-arm` runner makes the
 build native and those two steps unnecessary.
 
-The frontend is not wired to CI — `make deploy-frontend` stays a local command for now.
+The frontend deploys in the same job, right after the backend, built against the `BACKEND_URL`
+that `make deploy-backend` just wrote. The role's `deploy-frontend` policy covers the site bucket
+(`<project>-frontend-*` only) and CloudFront.
 
 ## 14. Where to take it next
 
@@ -545,4 +547,4 @@ screen, and add an Alembic revision for the new tables. Everything else — conf
 Compose, Dockerfiles, tooling, tests scaffolding — stays as is.
 
 The deliberate gaps, left for later: authentication and authorization, multi-tenancy, background
-workers, and a CI path for the frontend deploy.
+workers.

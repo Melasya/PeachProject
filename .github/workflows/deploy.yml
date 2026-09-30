@@ -1,0 +1,89 @@
+name: Deploy
+
+# Every push to main is linted, tested and - only if both pass - deployed:
+# backend first (it writes BACKEND_URL), then the frontend built against it.
+# The deploy logic lives in the Makefile targets, the same ones run locally.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, and never cancel one halfway: an interrupted
+# CloudFormation update is worse than a queued one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    uses: ./.github/workflows/test.yml
+
+  deploy:
+    name: Backend (Lambda) + frontend (CloudFront)
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to fetch the OIDC token that AWS trades for the role. The job
+      # holds no long-lived credentials.
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      # There is no .env here. Everything else falls back to the scripts'
+      # defaults, and any parameter left empty keeps whatever the stack
+      # already has - so a deploy from CI will not undo CORS settings.
+      PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deploy role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          role-session-name: gha-deploy-${{ github.run_id }}
+
+      # The function runs on arm64 and this runner is x86, so the image is
+      # built under emulation. Swapping to a `ubuntu-24.04-arm`
+      # runner makes it native, and these two steps unnecessary.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Writes BACKEND_URL into a throwaway .env, which deploy-frontend reads.
+      - name: Deploy backend
+        run: make deploy-backend
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Deploy frontend
+        run: make deploy-frontend
+
+      - name: Summary
+        if: always()
+        run: |
+          output() {
+            aws cloudformation describe-stacks --stack-name "${PROJECT_NAME:-peach}-$1" \
+              --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" \
+              --output text 2>/dev/null || echo "unknown"
+          }
+          {
+            echo "### Deploy"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${GITHUB_SHA::12}\` |"
+            echo "| api | $(output backend ApiUrl) |"
+            echo "| site | $(output frontend SiteUrl) |"
+            echo "| result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
