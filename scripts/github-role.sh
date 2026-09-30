@@ -48,8 +48,16 @@ fi
 
 SUBJECT_CLAIM="${GITHUB_SUBJECT_CLAIM:-ref:refs/heads/main}"
 
+# Repositories on GitHub's immutable subjects put the owner and repo IDs in the
+# token (repo:owner@123/repo@456:...), so the trust has to match that form.
+SUBJECT_PREFIX="${GITHUB_SUBJECT_PREFIX:-}"
+if [[ -z "${SUBJECT_PREFIX}" ]] && command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  SUBJECT_PREFIX="$(gh api "repos/${REPO}/actions/oidc/customization/sub" \
+    --jq 'select(.use_immutable_subject == true) | .sub_claim_prefix // empty' 2>/dev/null || true)"
+fi
+
 log "repository ${REPO}"
-log "trusting only runs matching repo:${REPO}:${SUBJECT_CLAIM}"
+log "trusting only runs matching ${SUBJECT_PREFIX:-repo:${REPO}}:${SUBJECT_CLAIM}"
 
 # --- the account may already have a GitHub provider ---------------------------
 
@@ -58,8 +66,17 @@ EXISTING_PROVIDER="$(aws iam list-open-id-connect-providers \
   --query "OpenIDConnectProviderList[?contains(Arn, 'token.actions.githubusercontent.com')]|[0].Arn" \
   --output text 2>/dev/null || true)"
 [[ "${EXISTING_PROVIDER}" == "None" ]] && EXISTING_PROVIDER=""
+# Unless this stack created it: passing it back in would make the stack delete it.
+OWNED_PROVIDER=""
+if aws cloudformation describe-stack-resource --stack-name "${STACK_NAME}" \
+  --logical-resource-id OidcProvider >/dev/null 2>&1; then
+  EXISTING_PROVIDER=""
+  OWNED_PROVIDER=1
+fi
 
-if [[ -n "${EXISTING_PROVIDER}" ]]; then
+if [[ -n "${OWNED_PROVIDER}" ]]; then
+  log "keeping the GitHub OIDC provider this stack already manages"
+elif [[ -n "${EXISTING_PROVIDER}" ]]; then
   log "reusing the GitHub OIDC provider already in this account"
 else
   log "this account has no GitHub OIDC provider yet - the stack creates one"
@@ -74,6 +91,7 @@ if ! aws cloudformation deploy \
     "ProjectName=${PROJECT_NAME}" \
     "GitHubRepo=${REPO}" \
     "SubjectClaim=${SUBJECT_CLAIM}" \
+    "SubjectPrefix=${SUBJECT_PREFIX}" \
     "ExistingProviderArn=${EXISTING_PROVIDER}" \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \

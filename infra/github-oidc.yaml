@@ -27,6 +27,15 @@ Parameters:
       main. "*" would allow any branch and any pull request of the repo, which
       means anyone who can open a PR can deploy.
 
+  SubjectPrefix:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^repo:[A-Za-z0-9_.@-]+/[A-Za-z0-9_.@-]+$"
+    Description: >-
+      The repository's OIDC subject prefix when GitHub issues immutable
+      subjects (repo:owner@<id>/repo@<id>). Empty falls back to repo:GitHubRepo.
+      Filled in by scripts/github-role.sh from the repository's OIDC settings.
+
   ExistingProviderArn:
     Type: String
     Default: ""
@@ -36,6 +45,7 @@ Parameters:
 
 Conditions:
   CreateProvider: !Equals [!Ref ExistingProviderArn, ""]
+  HasSubjectPrefix: !Not [!Equals [!Ref SubjectPrefix, ""]]
 
 Resources:
   # Thumbprints are no longer what AWS checks for this issuer - it validates
@@ -79,7 +89,10 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 # And without this, any repository on GitHub would do.
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:${SubjectClaim}"
+                token.actions.githubusercontent.com:sub: !If
+                  - HasSubjectPrefix
+                  - !Sub "${SubjectPrefix}:${SubjectClaim}"
+                  - !Sub "repo:${GitHubRepo}:${SubjectClaim}"
       Policies:
         # Deliberately not AdministratorAccess. Scoped to the services the
         # deploy actually drives, and to this project's names where the API
@@ -279,7 +292,10 @@ Outputs:
 
   Subject:
     Description: The only OIDC subject allowed to assume the role.
-    Value: !Sub "repo:${GitHubRepo}:${SubjectClaim}"
+    Value: !If
+      - HasSubjectPrefix
+      - !Sub "${SubjectPrefix}:${SubjectClaim}"
+      - !Sub "repo:${GitHubRepo}:${SubjectClaim}"
 
   ProviderArn:
     Value: !If
