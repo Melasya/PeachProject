@@ -24,15 +24,6 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"]
     )
 
-    # Cognito. With no user pool configured every protected endpoint answers
-    # 503, so a missing setting can never leave the API open.
-    cognito_region: str = "us-east-1"
-    cognito_user_pool_id: str = ""
-    cognito_client_id: str = ""
-    # The pool's public keys as JSON. Set on Lambda, which has no route to fetch
-    # them; left empty elsewhere, and they are downloaded from the issuer.
-    cognito_jwks: str = ""
-
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:
@@ -40,16 +31,6 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
-
-    @property
-    def cognito_issuer(self) -> str:
-        return (
-            f"https://cognito-idp.{self.cognito_region}.amazonaws.com/{self.cognito_user_pool_id}"
-        )
-
-    @property
-    def auth_configured(self) -> bool:
-        return bool(self.cognito_user_pool_id and self.cognito_client_id)
 
     @property
     def is_development(self) -> bool:

@@ -56,12 +56,6 @@
   --color-tint-green-foreground: var(--tint-green-foreground);
   --color-tint-gray: var(--tint-gray);
 
-  /* Status marks in charts. Validated with the dataviz palette checker in
-     both modes; "todo" is a deliberate neutral. */
-  --color-status-todo: var(--status-todo);
-  --color-status-progress: var(--status-progress);
-  --color-status-done: var(--status-done);
-
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -125,10 +119,6 @@
   --tint-green-foreground: #3f7d5c;
   --tint-gray: #f9f9f8;
 
-  --status-todo: #a5a4a0;
-  --status-progress: #2383e2;
-  --status-done: #2e9d5f;
-
   --shadow-tint-weak: rgb(15 15 15 / 0.05);
   --shadow-tint: rgb(15 15 15 / 0.1);
   --shadow-tint-strong: rgb(15 15 15 / 0.2);
@@ -177,10 +167,6 @@
   --tint-green: #232e2b;
   --tint-green-foreground: #85cfae;
   --tint-gray: #202020;
-
-  --status-todo: #6f6e6a;
-  --status-progress: #5b8def;
-  --status-done: #3fa35c;
 
   --shadow-tint-weak: rgb(0 0 0 / 0.2);
   --shadow-tint: rgb(0 0 0 / 0.3);

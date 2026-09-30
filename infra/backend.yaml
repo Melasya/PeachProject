@@ -118,25 +118,6 @@ Parameters:
     Default: "*"
     Description: Comma-separated browser origins; set this to the deployed frontend URL.
 
-  CognitoUserPoolId:
-    Type: String
-    Default: ""
-    Description: >-
-      From make deploy-cognito. Empty means no pool: every protected endpoint
-      then answers 503, never an open door.
-
-  CognitoClientId:
-    Type: String
-    Default: ""
-    Description: The web app client; tokens minted for any other client are refused.
-
-  CognitoJwks:
-    Type: String
-    Default: ""
-    Description: >-
-      The pool's public signing keys, as JSON. The function has no internet
-      route to fetch them, so the deploy script downloads and passes them in.
-
   LogRetentionDays:
     Type: Number
     Default: 7
@@ -298,10 +279,6 @@ Resources:
           APP_ENV: !Ref AppEnv
           LOG_LEVEL: !Ref LogLevel
           CORS_ORIGINS: !Ref CorsOrigins
-          COGNITO_REGION: !Ref AWS::Region
-          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
-          COGNITO_CLIENT_ID: !Ref CognitoClientId
-          COGNITO_JWKS: !Ref CognitoJwks
           # No pool: warm but idle environments would keep connections open,
           # and Aurora only pauses once there are none.
           DB_POOLING: "false"

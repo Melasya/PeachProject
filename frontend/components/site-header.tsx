@@ -1,27 +1,22 @@
 "use client";
 
-import { LogOut } from "lucide-react";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 
-import { Button } from "@/components/ui/button";
-import { signOut, useSession } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const links = [
-  { href: "/home", label: "Home" },
+  { href: "/", label: "Dashboard" },
   { href: "/items", label: "Board" },
 ];
 
 export function SiteHeader() {
   const pathname = usePathname();
-  const router = useRouter();
-  const session = useSession();
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/70 bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-14 w-full max-w-5xl items-center gap-8 px-6 sm:px-8">
-        <Link href="/home" className="flex items-center gap-2">
+        <Link href="/" className="flex items-center gap-2">
           <span
             aria-hidden
             className="grid size-6 place-items-center rounded-md bg-foreground font-heading text-[13px] leading-none font-semibold text-background"
@@ -35,7 +30,10 @@ export function SiteHeader() {
 
         <nav className="flex items-center gap-1 text-sm">
           {links.map((link) => {
-            const active = pathname.startsWith(link.href);
+            const active =
+              link.href === "/"
+                ? pathname === "/"
+                : pathname.startsWith(link.href);
             return (
               <Link
                 key={link.href}
@@ -53,31 +51,6 @@ export function SiteHeader() {
             );
           })}
         </nav>
-
-        {session && (
-          <div className="ml-auto flex items-center gap-2">
-            <span
-              aria-hidden
-              className="grid size-6 place-items-center rounded-full bg-tint-peach text-xs font-semibold text-tint-peach-foreground"
-            >
-              {session.name.charAt(0).toUpperCase()}
-            </span>
-            <span className="hidden text-sm text-muted-foreground sm:inline">
-              {session.email}
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                signOut();
-                router.replace("/");
-              }}
-            >
-              <LogOut data-icon="inline-start" className="size-4" />
-              Log out
-            </Button>
-          </div>
-        )}
       </div>
     </header>
   );

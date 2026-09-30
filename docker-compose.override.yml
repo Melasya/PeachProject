@@ -5,11 +5,8 @@ services:
   backend:
     build:
       target: dev
-    # uv sync first: the backend_venv volume outlives image rebuilds, so a
-    # dependency added to uv.lock would otherwise never reach the container.
     command: >
-      sh -c "uv sync --frozen --no-install-project &&
-             alembic upgrade head &&
+      sh -c "alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --log-level ${LOG_LEVEL:-info}"
     environment:
       APP_ENV: development

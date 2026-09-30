@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, api } from "@/lib/api";
-import { getIdToken, signOut } from "@/lib/auth";
-
-vi.mock("@/lib/auth", () => ({
-  getIdToken: vi.fn(async () => "id-token"),
-  signOut: vi.fn(),
-}));
 
 function mockFetch(body: unknown, init: { status?: number } = {}) {
   const status = init.status ?? 200;
@@ -37,26 +31,6 @@ describe("api", () => {
       status: 404,
       message: "Item not found",
     });
-  });
-
-  it("sends the ID token as a bearer token", async () => {
-    const spy = mockFetch({ items: [], total: 0 });
-    await api.listItems();
-    const headers = spy.mock.calls[0][1]?.headers as Record<string, string>;
-    expect(headers.Authorization).toBe("Bearer id-token");
-  });
-
-  it("does not call the API at all when signed out", async () => {
-    vi.mocked(getIdToken).mockResolvedValueOnce(null);
-    const spy = mockFetch({ items: [], total: 0 });
-    await expect(api.listItems()).rejects.toMatchObject({ status: 401 });
-    expect(spy).not.toHaveBeenCalled();
-  });
-
-  it("signs out when the API rejects the token", async () => {
-    mockFetch({ detail: "Token expired" }, { status: 401 });
-    await expect(api.listItems()).rejects.toMatchObject({ status: 401 });
-    expect(signOut).toHaveBeenCalled();
   });
 
   it("raises ApiError when the network is unreachable", async () => {

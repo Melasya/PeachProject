@@ -80,7 +80,7 @@ PY
 
 # --- preflight --------------------------------------------------------------
 
-for tool in aws docker python3 curl; do
+for tool in aws docker python3; do
   command -v "${tool}" >/dev/null 2>&1 || die "${tool} is required but not installed"
 done
 docker info >/dev/null 2>&1 || die "docker daemon is not running"
@@ -192,22 +192,6 @@ alphabet = string.ascii_letters + string.digits + "-_.~"
 print("".join(secrets.choice(alphabet) for _ in range(40)))')"
 fi
 
-# --- cognito ----------------------------------------------------------------
-
-# The function cannot reach the internet, so it cannot fetch the pool's signing
-# keys itself; download them here and hand them over as a parameter. Without a
-# pool id (CI has no .env) the stack keeps the keys it already has.
-COGNITO_JWKS=""
-if [[ -n "${COGNITO_USER_POOL_ID:-}" ]]; then
-  JWKS_URL="https://cognito-idp.${COGNITO_REGION:-${AWS_REGION}}.amazonaws.com/${COGNITO_USER_POOL_ID}/.well-known/jwks.json"
-  log "fetching signing keys for ${COGNITO_USER_POOL_ID}"
-  COGNITO_JWKS="$(curl -fsS --max-time 20 "${JWKS_URL}" \
-    | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))')" \
-    || die "could not fetch ${JWKS_URL} - is COGNITO_USER_POOL_ID right? (make deploy-cognito)"
-else
-  warn "COGNITO_USER_POOL_ID unset - keeping the stack's current Cognito settings"
-fi
-
 # --- deploy -----------------------------------------------------------------
 
 # Parameters go through a 0600 file rather than argv, so the password never
@@ -234,9 +218,6 @@ DB_SECONDS_UNTIL_AUTO_PAUSE="${DB_SECONDS_UNTIL_AUTO_PAUSE:-}" \
 APP_ENV="${APP_ENV_AWS:-production}" \
 LOG_LEVEL="${LOG_LEVEL:-info}" \
 CORS_ORIGINS="${API_CORS_ORIGINS:-}" \
-COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-}" \
-COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-}" \
-COGNITO_JWKS="${COGNITO_JWKS}" \
 python3 - "${PARAMS_FILE}" <<'PY'
 import json, os, sys
 
@@ -258,9 +239,6 @@ params = {
     "AppEnv": os.environ["APP_ENV"],
     "LogLevel": os.environ["LOG_LEVEL"],
     "CorsOrigins": os.environ["CORS_ORIGINS"],
-    "CognitoUserPoolId": os.environ["COGNITO_USER_POOL_ID"],
-    "CognitoClientId": os.environ["COGNITO_CLIENT_ID"],
-    "CognitoJwks": os.environ["COGNITO_JWKS"],
 }
 # An empty value means "leave this alone": CloudFormation reuses the stack's
 # existing value for any parameter the deploy does not mention, and falls back

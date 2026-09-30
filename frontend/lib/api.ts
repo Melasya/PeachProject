@@ -1,7 +1,5 @@
 import { z } from "zod";
 
-import { getIdToken, signOut } from "@/lib/auth";
-
 /** Browser code must reach the API through the published port; server components
  *  resolve the Compose service name instead. */
 export function apiBaseUrl(): string {
@@ -26,10 +24,6 @@ async function request<T>(
   schema: z.ZodType<T>,
   init?: RequestInit,
 ): Promise<T> {
-  // Every API route needs a signed-in user; don't send what would bounce.
-  const token = await getIdToken();
-  if (!token) throw new ApiError(401, "You are signed out");
-
   let response: Response;
   try {
     response = await fetch(`${apiBaseUrl()}${path}`, {
@@ -37,17 +31,12 @@ async function request<T>(
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
         ...(init?.headers ?? {}),
       },
     });
   } catch {
     throw new ApiError(0, "Could not reach the API");
   }
-
-  // The API no longer accepts this session (revoked, or the pool changed):
-  // drop it, and the auth gate sends the user back to the login page.
-  if (response.status === 401) signOut();
 
   if (!response.ok) {
     const detail = await response

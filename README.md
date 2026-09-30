@@ -189,22 +189,6 @@ exposed through a `@lru_cache`d `get_settings()`. No module reads `os.environ` d
 Base path `/api/v1`. JSON only. Errors use FastAPI's default shape
 (`{"detail": ...}`) with the appropriate status code.
 
-### Authentication
-
-Every route under `/api/v1` requires `Authorization: Bearer <Cognito ID token>`; only `/health`
-(liveness) is public. The token's signature is checked against the user pool's public keys, then
-its issuer, audience (the web app client), expiry and `token_use == "id"`. Missing or bad token →
-`401` with `WWW-Authenticate: Bearer`; no pool configured → `503`, never an open door. The first
-request from a person creates their `users` row (keyed by Cognito `sub`), and every item query is
-scoped to that user — someone else's item answers `404`, exactly like a missing one.
-
-`users` table: `id uuid pk`, `cognito_sub varchar(64) unique`, `email`, `name`, `created_at`,
-`updated_at`. `items.owner_id uuid not null references users(id) on delete cascade`.
-
-| Method | Path | Response |
-|--------|------|----------|
-| `GET` | `/api/v1/me` | `{"id", "email", "name", "created_at"}` — the signed-in user |
-
 ### Health
 
 | Method | Path | Response |
@@ -244,17 +228,8 @@ Interactive docs at `/docs` (Swagger) and `/redoc`; the raw schema at `/openapi.
 
 ## 6. Frontend behaviour
 
-- `/` — log in (email + password, or Google once it is enabled); `/signup` — create an account,
-  then enter the code Cognito emails; `/auth/callback` — where Google sign-in lands. Sign-in talks
-  to Cognito straight from the browser (`lib/auth.ts`): the public `InitiateAuth` / `SignUp` API
-  for passwords, the hosted domain with the OAuth code flow + PKCE for Google. Tokens live in
-  `localStorage`; the ID token is renewed from the refresh token a minute before it expires.
-- `/home` — progress dashboard: the share of tasks done (headline figure + meter), a stacked
-  bar of tasks by status with legend and hover tooltips, a tile per status linking to the board,
-  this week's added/completed counts, and short "In progress" / "Recently completed" lists.
-- `/home` and `/items` sit behind `AuthGate`, which sends signed-out visitors to `/`. That is a
-  convenience: the static export has no server to refuse a page, so the real boundary is the API,
-  which answers nothing without a valid token. A `401` from it signs the browser out.
+- `/` — dashboard. Calls `/health/ready` and renders a shadcn `Badge` (green "Connected" /
+  red "Unavailable"), plus a `Card` summarising item counts.
 - `/items` — a Trello-style board in Notion styling: one column per status (To do, In progress,
   Done). Cards drag between columns (native HTML5 drag and drop, optimistic update rolled back on
   error); clicking a card opens a `Dialog` with a `react-hook-form` + `zod` form to edit title,
@@ -376,17 +351,6 @@ The generated project was checked end to end:
 | UI round trip | create → edit → delete an item in the browser | row confirmed in Postgres at each step |
 
 ## 11. Deploying the backend to AWS
-
-Sign-in comes first: `make deploy-cognito` creates the user pool, app client and hosted domain
-(`infra/cognito.yaml`) and writes `COGNITO_REGION`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`,
-`COGNITO_DOMAIN` and `COGNITO_GOOGLE_ENABLED` to `.env`, printing them as well. Compose passes
-them to both services, `make deploy-backend` fetches the pool's signing keys and hands them to the
-Lambda (it has no internet route to fetch them), and `make deploy-frontend` compiles the ids in.
-Re-run it after the first `make deploy-frontend` so the site's URL is allowed as an OAuth
-redirect. For Google, create an OAuth client in Google Cloud with the redirect URI the deploy
-prints, set `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env`, re-run `make deploy-cognito`,
-then rebuild the frontend so the button appears. `make destroy-cognito` deletes the pool and
-every account in it.
 
 Everything lives in **us-east-1**, and every resource carries a `PROJECT_NAME` tag.
 

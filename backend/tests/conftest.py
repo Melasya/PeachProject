@@ -25,10 +25,6 @@ def _test_database_url() -> str:
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = _test_database_url()
 
-# Must run before the app is imported: it points the app at the test key.
-from tests.tokens import auth  # noqa: E402
-
-# isort: split
 from app.db import Base, get_session  # noqa: E402
 from app.main import create_app  # noqa: E402
 
@@ -76,8 +72,7 @@ async def session(engine) -> AsyncIterator[AsyncSession]:
 
 
 @pytest.fixture
-async def anon_client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
-    """A client with no credentials."""
+async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
     app = create_app()
 
     async def _override() -> AsyncIterator[AsyncSession]:
@@ -88,10 +83,3 @@ async def anon_client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     app.dependency_overrides.clear()
-
-
-@pytest.fixture
-async def client(anon_client: AsyncClient) -> AsyncClient:
-    """Signed in as alice@example.com."""
-    anon_client.headers.update(auth())
-    return anon_client
