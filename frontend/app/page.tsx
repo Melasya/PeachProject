@@ -70,8 +70,8 @@ export default function DashboardPage() {
             How the pieces fit
           </h2>
           <p className="mt-1.5 max-w-prose text-sm text-tint-blue-foreground/85">
-          The browser talks to Next.js, Next.js talks to FastAPI over the
-          published port, and FastAPI keeps its rows in Postgres. Every card
+            The browser talks to Next.js, Next.js talks to FastAPI over the
+            published port, and FastAPI keeps its rows in Postgres. Every card
             above is a round trip through all three.
           </p>
         </div>
