@@ -28,3 +28,7 @@ out/
 
 # --- docker ---
 pgdata/
+
+# --- deploy ---
+# written by scripts/deploy-backend.sh; holds the database password
+infra-params.json

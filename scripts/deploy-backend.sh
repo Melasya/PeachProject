@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TEMPLATE="${ROOT}/infra/backend.yaml"
+TEMPLATE="infra/backend.yaml"
 ENV_FILE="${ROOT}/.env"
 
 log() { printf '\033[36m==>\033[0m %s\n' "$*"; }
@@ -165,7 +165,7 @@ docker buildx build \
   --sbom=false \
   --tag "${IMAGE_URI}" \
   --push \
-  "${ROOT}/backend"
+  backend
 
 # --- database password ------------------------------------------------------
 
@@ -196,9 +196,13 @@ fi
 
 # Parameters go through a 0600 file rather than argv, so the password never
 # shows up in `ps`.
-PARAMS_FILE="$(mktemp)"
+PARAMS_FILE="infra-params.json"
+# Create (or empty) it owner-only before anything writes the password into it.
+( umask 077 && : > "${PARAMS_FILE}" )
 chmod 600 "${PARAMS_FILE}"
 RESULT_FILE="$(mktemp)"
+# aws.exe cannot open Git Bash paths like /c/tmp/...; hand it C:/tmp/... instead.
+command -v cygpath >/dev/null 2>&1 && RESULT_FILE="$(cygpath -m "${RESULT_FILE}")"
 trap 'rm -f "${PARAMS_FILE}" "${RESULT_FILE}"' EXIT
 
 PROJECT_NAME="${PROJECT_NAME}" \

@@ -74,29 +74,8 @@ Parameters:
 
   DbEngineVersion:
     Type: String
-    Default: "17.4"
-    Description: >-
-      Aurora PostgreSQL version. Scaling to zero needs 17.4+, 16.3+, 15.7+,
-      14.12+ or 13.15+.
-
-  DbMinCapacity:
-    Type: Number
-    Default: 0
-    MinValue: 0
-    Description: ACUs. 0 lets the cluster pause when nothing is connected.
-
-  DbMaxCapacity:
-    Type: Number
-    Default: 1
-    MinValue: 1
-    Description: ACUs. The ceiling on what a traffic spike can cost.
-
-  DbSecondsUntilAutoPause:
-    Type: Number
-    Default: 300
-    MinValue: 300
-    MaxValue: 86400
-    Description: Idle time, with no connections, before the cluster pauses.
+    Default: "17"
+    Description: RDS for PostgreSQL major version; RDS picks its current minor.
 
   DbBackupRetentionDays:
     Type: Number
@@ -165,44 +144,32 @@ Resources:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
 
-  # A starter database: one serverless instance, never reachable from the
-  # internet, and torn down with the stack. Turn on DeletionProtection before
-  # this holds anything you would miss.
-  DbCluster:
-    Type: AWS::RDS::DBCluster
-    DeletionPolicy: Delete
-    UpdateReplacePolicy: Delete
-    Properties:
-      DBClusterIdentifier: !Sub "${ProjectName}-db"
-      Engine: aurora-postgresql
-      EngineVersion: !Ref DbEngineVersion
-      DatabaseName: !Ref DbName
-      MasterUsername: !Ref DbUsername
-      MasterUserPassword: !Ref DbPassword
-      DBSubnetGroupName: !Ref DbSubnetGroup
-      VpcSecurityGroupIds: [!Ref DbSecurityGroup]
-      StorageEncrypted: true
-      BackupRetentionPeriod: !Ref DbBackupRetentionDays
-      CopyTagsToSnapshot: true
-      DeletionProtection: false
-      ServerlessV2ScalingConfiguration:
-        MinCapacity: !Ref DbMinCapacity
-        MaxCapacity: !Ref DbMaxCapacity
-        SecondsUntilAutoPause: !Ref DbSecondsUntilAutoPause
-      Tags:
-        - Key: PROJECT_NAME
-          Value: !Ref ProjectName
-
+  # A starter database: one free-tier-class RDS PostgreSQL instance (AWS Free
+  # Plan accounts cannot create Aurora through CloudFormation), single-AZ,
+  # never reachable from the internet, and torn down with the stack. Turn on
+  # DeletionProtection before this holds anything you would miss.
   DbInstance:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      DBInstanceIdentifier: !Sub "${ProjectName}-db-1"
-      DBClusterIdentifier: !Ref DbCluster
-      DBInstanceClass: db.serverless
-      Engine: aurora-postgresql
+      DBInstanceIdentifier: !Sub "${ProjectName}-db"
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: "20"
+      StorageType: gp2
+      MultiAZ: false
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbUsername
+      MasterUserPassword: !Ref DbPassword
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
       PubliclyAccessible: false
+      StorageEncrypted: true
+      BackupRetentionPeriod: !Ref DbBackupRetentionDays
+      CopyTagsToSnapshot: true
+      DeletionProtection: false
       AutoMinorVersionUpgrade: true
       EnablePerformanceInsights: false
       Tags:
@@ -220,8 +187,8 @@ Resources:
       Description: !Sub "SQLAlchemy async connection string for ${ProjectName}"
       SecretString: !Sub
         - "postgresql+asyncpg://${DbUsername}:${DbPassword}@${Endpoint}:${Port}/${DbName}"
-        - Endpoint: !GetAtt DbCluster.Endpoint.Address
-          Port: !GetAtt DbCluster.Endpoint.Port
+        - Endpoint: !GetAtt DbInstance.Endpoint.Address
+          Port: !GetAtt DbInstance.Endpoint.Port
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -284,8 +251,8 @@ Resources:
           DB_POOLING: "false"
           DATABASE_URL: !Sub
             - "postgresql+asyncpg://${DbUsername}:${DbPassword}@${Endpoint}:${Port}/${DbName}"
-            - Endpoint: !GetAtt DbCluster.Endpoint.Address
-              Port: !GetAtt DbCluster.Endpoint.Port
+            - Endpoint: !GetAtt DbInstance.Endpoint.Address
+              Port: !GetAtt DbInstance.Endpoint.Port
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -327,7 +294,7 @@ Outputs:
     Value: !Ref Function
 
   DatabaseEndpoint:
-    Value: !GetAtt DbCluster.Endpoint.Address
+    Value: !GetAtt DbInstance.Endpoint.Address
 
   DatabaseUrlSecretArn:
     Value: !Ref DatabaseUrlSecret
