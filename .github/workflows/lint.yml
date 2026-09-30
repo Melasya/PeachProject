@@ -65,5 +65,10 @@ jobs:
       - name: prettier --check
         run: pnpm format:check
 
+      # LayoutProps/PageProps are generated into .next/types, which a fresh
+      # checkout lacks; generate them without a full build.
+      - name: next typegen
+        run: pnpm exec next typegen
+
       - name: tsc --noEmit
         run: pnpm exec tsc --noEmit
