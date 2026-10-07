@@ -69,6 +69,27 @@ log "building against ${API_URL}"
 [[ "${API_URL}" == https://* ]] \
   || die "BACKEND_URL must be https:// - browsers block an HTTPS page calling HTTP"
 
+# --- which Cognito user pool does it sign in with? --------------------------
+
+# Public values only, read from the auth stack's outputs rather than copied by
+# hand: the client has no secret, and the Google secret never leaves Cognito.
+# CI reads them the same way. A site without them would have no sign-in, so
+# stop instead of shipping one.
+AUTH_STACK="${AUTH_STACK_NAME:-${PROJECT_NAME}-auth}"
+auth_output() {
+  aws cloudformation describe-stacks --stack-name "${AUTH_STACK}" \
+    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true
+}
+COGNITO_AUTHORITY="$(auth_output Authority)"
+COGNITO_CLIENT_ID="$(auth_output ClientId)"
+COGNITO_DOMAIN="$(auth_output HostedDomainUrl)"
+for value in "${COGNITO_AUTHORITY}" "${COGNITO_CLIENT_ID}" "${COGNITO_DOMAIN}"; do
+  [[ -n "${value}" && "${value}" != "None" ]] \
+    || die "no sign-in settings from stack ${AUTH_STACK} - run make deploy-auth first"
+done
+
+log "signing in with ${COGNITO_AUTHORITY}"
+
 # --- infrastructure ---------------------------------------------------------
 
 if ! aws cloudformation describe-stacks --stack-name "${STACK_NAME}" >/dev/null 2>&1; then
@@ -108,7 +129,11 @@ log "installing dependencies"
 
 log "building the static export"
 rm -rf "${APP}/out"
-(cd "${APP}" && NEXT_OUTPUT=export NEXT_PUBLIC_API_URL="${API_URL}" "${PM[@]}" build)
+(cd "${APP}" && NEXT_OUTPUT=export NEXT_PUBLIC_API_URL="${API_URL}" \
+  NEXT_PUBLIC_COGNITO_AUTHORITY="${COGNITO_AUTHORITY}" \
+  NEXT_PUBLIC_COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
+  NEXT_PUBLIC_COGNITO_DOMAIN="${COGNITO_DOMAIN}" \
+  "${PM[@]}" build)
 [[ -f "${APP}/out/index.html" ]] || die "the export produced no out/index.html"
 
 # --- upload -----------------------------------------------------------------
@@ -143,6 +168,7 @@ aws cloudfront wait invalidation-completed \
 echo
 echo "  site       ${SITE_URL}"
 echo "  items      ${SITE_URL}/items"
+echo "  login      ${SITE_URL}/login/"
 echo "  api        ${API_URL}"
 echo "  bucket     s3://${BUCKET}"
 echo

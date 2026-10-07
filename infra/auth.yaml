@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Peach sign-in: a Cognito user pool with self sign-up by email and password,
+  Google federation, and Cognito's managed login (version 2) on a prefix
+  domain. The browser app is a public client using the authorization code
+  flow with PKCE. Deployed by scripts/deploy-auth.sh, which passes the Google
+  client secret from the gitignored .env as a NoEcho parameter.
+
+  Costs nothing at this size: the Essentials tier is free up to 10,000 monthly
+  active users, and the domain, client and branding are free.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: peach
+
+  DomainPrefix:
+    Type: String
+    Default: peach-melasya
+    AllowedPattern: "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    Description: >-
+      Managed login lives at https://<prefix>.auth.<region>.amazoncognito.com.
+      The Google OAuth client's origin and redirect URI point here.
+
+  SiteUrl:
+    Type: String
+    Default: https://d2domne1zgw08y.cloudfront.net
+    AllowedPattern: "^https://[^/]+$"
+    Description: The deployed frontend's origin, with no trailing slash.
+
+  LocalUrl:
+    Type: String
+    Default: http://localhost:3000
+    AllowedPattern: "^http://localhost:[0-9]+$"
+    Description: The local dev server's origin, with no trailing slash.
+
+  GoogleClientId:
+    Type: String
+    MinLength: 1
+    Description: Client ID of the Google OAuth web client. Not a secret.
+
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 1
+    Description: >-
+      Client secret of the Google OAuth web client. Comes from the gitignored
+      .env through scripts/deploy-auth.sh; never in the repository or the
+      frontend build.
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-users"
+      # Managed login needs Essentials; the first 10,000 monthly users are free.
+      UserPoolTier: ESSENTIALS
+      # People sign in with their email, not a separate username.
+      UsernameAttributes: [email]
+      # Cognito emails a confirmation code on sign-up.
+      AutoVerifiedAttributes: [email]
+      # Self sign-up stays on, so anyone can create an account.
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      DeletionProtection: INACTIVE
+      UserPoolTags:
+        PROJECT_NAME: !Ref ProjectName
+
+  # Cognito federates to Google; the site itself never talks to Google.
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: openid email profile
+      # Without this a Google user arrives with no email for the header to show.
+      AttributeMapping:
+        email: email
+        email_verified: email_verified
+
+  # A browser cannot keep a secret, so the client has none; PKCE (done by
+  # oidc-client-ts) protects the code exchange instead.
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    # A client that names a provider which does not exist yet fails to create.
+    DependsOn: GoogleIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "${ProjectName}-web"
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      SupportedIdentityProviders: [COGNITO, Google]
+      # Exact matches, trailing slash included: the app sends exactly these.
+      CallbackURLs:
+        - !Sub "${SiteUrl}/login/"
+        - !Sub "${LocalUrl}/login/"
+      LogoutURLs:
+        - !Sub "${SiteUrl}/"
+        - !Sub "${LocalUrl}/"
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Domain: !Ref DomainPrefix
+      ManagedLoginVersion: 2
+
+  # Without a branding style a version 2 domain has no sign-in page to show.
+  ManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+
+  ClientId:
+    Description: The public web client - NEXT_PUBLIC_COGNITO_CLIENT_ID.
+    Value: !Ref UserPoolClient
+
+  Authority:
+    Description: OIDC issuer - NEXT_PUBLIC_COGNITO_AUTHORITY.
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+
+  HostedDomainUrl:
+    Description: Managed login and /logout - NEXT_PUBLIC_COGNITO_DOMAIN.
+    Value: !Sub "https://${DomainPrefix}.auth.${AWS::Region}.amazoncognito.com"
+
+  LoginPageUrl:
+    Description: The URL to submit.
+    Value: !Sub "${SiteUrl}/login/"

@@ -46,6 +46,9 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_COGNITO_AUTHORITY: ${COGNITO_AUTHORITY:-}
+        NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
+        NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
     restart: unless-stopped
     depends_on:
       backend:
@@ -53,6 +56,10 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8000}
+      # Public sign-in settings from make deploy-auth; empty hides sign-in.
+      NEXT_PUBLIC_COGNITO_AUTHORITY: ${COGNITO_AUTHORITY:-}
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
+      NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
       NODE_ENV: production
     ports:
       - "${FRONTEND_PORT:-3000}:3000"

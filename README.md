@@ -22,7 +22,7 @@ everything runnable with a single `docker compose up`.
 | 4 | One-command startup | `docker compose up --build` serves the UI on `:3000` and the API on `:8000` |
 | 5 | Database in Compose | PostgreSQL service with a named volume; migrations applied on backend start |
 
-Non-goals for this iteration: authentication, authorization, multi-tenancy, background workers,
+Non-goals for this iteration: authorization, multi-tenancy, background workers,
 production deployment manifests. Leave hooks for them, do not build them.
 
 ---
@@ -75,6 +75,7 @@ Peach/
 ├── infra/
 │   ├── backend.yaml              # CloudFormation: Lambda + function URL + RDS PostgreSQL
 │   ├── frontend.yaml             # CloudFormation: S3 + CloudFront (+ optional custom domain)
+│   ├── auth.yaml                 # CloudFormation: Cognito user pool, Google, managed login
 │   └── github-oidc.yaml          # CloudFormation: the role Actions assumes
 │
 ├── scripts/
@@ -83,6 +84,7 @@ Peach/
 │   ├── deploy-frontend.sh        # static export (against BACKEND_URL) -> S3 -> CloudFront
 │   ├── domain-frontend.sh        # us-east-1 ACM certificate + DNS for the frontend's domain
 │   ├── destroy-frontend.sh       # delete the bucket and distribution
+│   ├── deploy-auth.sh            # Cognito stack (Google secret from .env) -> COGNITO_* in .env
 │   └── github-role.sh            # the OIDC role CI assumes to deploy
 │
 ├── backend/
@@ -231,6 +233,8 @@ Interactive docs at `/docs` (Swagger) and `/redoc`; the raw schema at `/openapi.
 
 - `/` — dashboard. Calls `/health/ready` and renders a shadcn `Badge` (green "Connected" /
   red "Unavailable"), plus a `Card` summarising item counts.
+- `/login/` — starts Cognito's managed login (email + password, or Google) and receives the
+  redirect back; the header then shows the user's email and **Sign out** (§14).
 - `/items` — a Trello-style board in Notion styling: one column per status (To do, In progress,
   Done). Cards drag between columns (native HTML5 drag and drop, optimistic update rolled back on
   error); clicking a card opens a `Dialog` with a `react-hook-form` + `zod` form to edit title,
@@ -540,11 +544,59 @@ The frontend deploys in the same job, right after the backend, built against the
 that `make deploy-backend` just wrote. The role's `deploy-frontend` policy covers the site bucket
 (`<project>-frontend-*` only) and CloudFront.
 
-## 14. Where to take it next
+## 14. Sign-in with Cognito
+
+```bash
+make deploy-auth        # once the Google OAuth client exists: user pool, Google, managed login
+make deploy-frontend    # rebuild the site with the auth stack's public outputs
+```
+
+`infra/auth.yaml` is the whole sign-in setup in one stack (`peach-auth`):
+
+```
+browser -> /login/ -> Cognito managed login (email + password, or Continue with Google)
+        <- /login/?code=... -> tokens (code flow + PKCE) -> email in the header
+```
+
+- **User pool** (`ESSENTIALS` tier, free up to 10,000 monthly users): people sign in with their
+  email, Cognito emails a confirmation code, and self sign-up is on. Cognito's built-in sender
+  allows about 50 emails a day.
+- **Google identity provider**: Cognito federates to Google; the site never talks to Google.
+  `email` and `email_verified` are mapped, so a Google user arrives with an email to show.
+- **Web client**: public (`GenerateSecret: false`), code flow, scopes `openid email profile`,
+  providers `COGNITO` and `Google`. Callback URLs are `<site>/login/` and
+  `http://localhost:3000/login/`; logout URLs are `<site>/` and `http://localhost:3000/`. They
+  must match exactly, trailing slash included.
+- **Domain** `peach-melasya.auth.us-east-1.amazoncognito.com` with managed login version 2, and
+  **branding** with Cognito's default style - without it a version 2 domain shows no page.
+
+In the frontend, `react-oidc-context` on top of `oidc-client-ts` does the redirect, the state and
+the PKCE verifier. `/login/` starts sign-in as soon as it loads, and is also where Cognito sends
+the browser back; the header shows the user's email and **Sign out**, which clears the local
+session and then goes through Cognito's `/logout` (Cognito has no OIDC end-session endpoint).
+`next.config.ts` keeps `trailingSlash` off: the export writes `login.html`, and the CloudFront
+Function already serves it for `/login/`.
+
+**The values are public and come from the stack.** `make deploy-frontend` reads the auth stack's
+`Authority`, `ClientId` and `HostedDomainUrl` outputs and compiles them in as
+`NEXT_PUBLIC_COGNITO_*`, the same way as the API URL; CI reads them the same way.
+`make deploy-auth` also writes them to `.env` as `COGNITO_*`, which Compose passes to the dev
+server.
+
+**The Google client secret never leaves `.env` and Cognito.** Create the Google OAuth client
+first (Google Auth Platform: External, scopes `openid`, `email` and `profile` only, published
+*In production*; a Web application client whose JavaScript origin is
+`https://peach-melasya.auth.us-east-1.amazoncognito.com` and whose redirect URI is that origin
+plus `/oauth2/idpresponse`), and put `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the
+gitignored `.env`. `make deploy-auth` hands the secret to CloudFormation as a `NoEcho` parameter
+through a `0600` file that is deleted on exit (`auth-params.json`, also gitignored). It is not in
+the repository, not in GitHub, and not in the frontend build. CI never deploys this stack.
+
+## 15. Where to take it next
 
 When the real domain arrives, replace the `Item` model, schemas, service, routes and the `/items`
 screen, and add an Alembic revision for the new tables. Everything else — config, database wiring,
 Compose, Dockerfiles, tooling, tests scaffolding — stays as is.
 
-The deliberate gaps, left for later: authentication and authorization, multi-tenancy, background
-workers.
+The deliberate gaps, left for later: authorization (the API does not check the sign-in yet),
+multi-tenancy, background workers.

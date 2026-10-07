@@ -32,3 +32,5 @@ pgdata/
 # --- deploy ---
 # written by scripts/deploy-backend.sh; holds the database password
 infra-params.json
+# written by scripts/deploy-auth.sh; holds the Google client secret
+auth-params.json

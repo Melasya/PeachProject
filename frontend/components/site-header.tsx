@@ -2,7 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "react-oidc-context";
 
+import { Button } from "@/components/ui/button";
+import { authConfigured, signOut } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const links = [
@@ -51,7 +54,45 @@ export function SiteHeader() {
             );
           })}
         </nav>
+
+        {authConfigured && <AccountMenu />}
       </div>
     </header>
+  );
+}
+
+/** Sign in when signed out; the user's email and Sign out when signed in. */
+function AccountMenu() {
+  const auth = useAuth();
+
+  // Nothing until the stored session has been read, so the header does not
+  // flash "Sign in" for someone who is signed in.
+  if (auth.isLoading) return null;
+
+  if (auth.isAuthenticated) {
+    return (
+      <div className="ml-auto flex min-w-0 items-center gap-3 text-sm">
+        <span className="truncate text-muted-foreground">
+          {auth.user?.profile.email}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void signOut(() => auth.removeUser())}
+        >
+          Sign out
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <Button
+      size="sm"
+      className="ml-auto"
+      onClick={() => void auth.signinRedirect()}
+    >
+      Sign in
+    </Button>
   );
 }
