@@ -78,6 +78,16 @@ Parameters:
     Default: ENABLED
     AllowedValues: [ENABLED, DISABLED]
 
+  SimulateBuilderFailure:
+    Type: String
+    Default: "false"
+    AllowedValues: ["false", "true"]
+    Description: >-
+      TEST ONLY - the DLQ redrive demonstration. "true" makes every valid
+      request fail before it touches RDS or S3, so it ends in the DLQ.
+      deploy-reports.sh sets it explicitly on every deploy: "true" only with
+      --simulate-failure, "false" otherwise (--image-only included).
+
   LogRetentionDays:
     Type: Number
     Default: 14
@@ -270,6 +280,7 @@ Resources:
           DB_POOLING: "false"
           REPORT_TIMEZONE: !Ref ReportTimezone
           REPORTS_BUCKET: !Sub "${ProjectName}-reports-${AWS::AccountId}-${AWS::Region}"
+          REPORTS_SIMULATE_FAILURE: !Ref SimulateBuilderFailure
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -449,3 +460,7 @@ Outputs:
 
   MailerLogGroupName:
     Value: !Ref MailerLogGroup
+
+  SimulateBuilderFailure:
+    Description: TEST ONLY. Must read "false" outside the DLQ redrive demonstration.
+    Value: !Ref SimulateBuilderFailure

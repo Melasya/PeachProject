@@ -55,6 +55,7 @@ class FakeSES:
 def s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
     fake = FakeS3()
     monkeypatch.setenv("REPORTS_BUCKET", "reports-bucket")
+    monkeypatch.delenv(builder.SIMULATE_FAILURE_ENV, raising=False)
     monkeypatch.setattr(builder, "s3_client", lambda: fake)
     # Monday 5 October 2026, 07:00 in Kyiv: the scheduled run.
     monkeypatch.setattr(builder, "_now", lambda: datetime(2026, 10, 5, 4, 0, tzinfo=UTC))
@@ -207,6 +208,67 @@ def test_missing_bucket_setting_fails(
     with pytest.raises(RuntimeError, match="REPORTS_BUCKET"):
         builder.handler({"source": "schedule"}, None)
     assert built == []
+
+
+# --- test-only failure switch (DLQ redrive demonstration) -------------------------
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", " true "])
+def test_failure_switch_fails_valid_requests_before_any_access(
+    s3: FakeS3,
+    built: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    value: str,
+) -> None:
+    monkeypatch.setenv(builder.SIMULATE_FAILURE_ENV, value)
+    caplog.set_level(logging.INFO)
+    with pytest.raises(RuntimeError, match="simulated builder outage"):
+        builder.handler(sqs_event({"week": "2026-W39", "source": "manual"}), None)
+
+    assert built == []  # no database read
+    assert s3.puts == []  # no report, so no email
+    lines = logged(caplog)
+    failed = [line for line in lines if line["event"] == "simulated_failure"]
+    assert [(f["trigger"], f["source"], f["week"]) for f in failed] == [
+        ("sqs", "manual", "2026-W39")
+    ]
+    assert not any(line["event"] == "build_started" for line in lines)
+
+
+def test_failure_switch_applies_to_scheduled_runs_too(
+    s3: FakeS3, built: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(builder.SIMULATE_FAILURE_ENV, "true")
+    with pytest.raises(RuntimeError, match="simulated builder outage"):
+        builder.handler({"source": "schedule"}, None)
+    assert built == [] and s3.puts == []
+
+
+@pytest.mark.parametrize("value", ["", "false", "False", "1", "yes", "on", "t", "truthy"])
+def test_failure_switch_is_off_unless_exactly_true(
+    s3: FakeS3, built: list[str], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv(builder.SIMULATE_FAILURE_ENV, value)
+    builder.handler({"source": "schedule", "week": "2026-W40"}, None)
+    assert built == ["2026-W40"]
+    assert [p["Key"] for p in s3.puts] == ["reports/2026-W40.csv"]
+
+
+def test_failure_switch_is_off_when_unset(s3: FakeS3, built: list[str]) -> None:
+    assert not builder.simulated_failure_enabled()
+    builder.handler(sqs_event({"week": "2026-W40", "source": "manual"}), None)
+    assert built == ["2026-W40"]
+
+
+def test_week_validation_still_comes_first_with_the_switch_on(
+    s3: FakeS3, built: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad week is still a ValueError (a poison message), never the simulated outage."""
+    monkeypatch.setenv(builder.SIMULATE_FAILURE_ENV, "true")
+    with pytest.raises(ValueError, match="week must look like"):
+        builder.handler(sqs_event({"week": "not-a-week", "source": "dlq-test"}), None)
+    assert built == [] and s3.puts == []
 
 
 # --- mailer ----------------------------------------------------------------------

@@ -34,6 +34,12 @@ logger.setLevel(logging.INFO)
 
 KEY_PREFIX = "reports/"
 
+# Test-only switch for the DLQ redrive demonstration: when exactly "true", every
+# valid request fails after validation and before any database or S3 access, so
+# messages go to the DLQ untouched. Set only by `deploy-reports.sh
+# --simulate-failure`; every other deploy sets it back to "false".
+SIMULATE_FAILURE_ENV = "REPORTS_SIMULATE_FAILURE"
+
 _s3: Any = None
 
 
@@ -67,13 +73,20 @@ def _resolve_week(request: dict[str, Any]) -> str:
     return str(IsoWeek.parse(week))
 
 
+def simulated_failure_enabled() -> bool:
+    return os.environ.get(SIMULATE_FAILURE_ENV, "").strip().lower() == "true"
+
+
 def _build_and_upload(request: dict[str, Any], trigger: str, **context: Any) -> dict[str, Any]:
     bucket = os.environ.get("REPORTS_BUCKET")
     if not bucket:
         raise RuntimeError("REPORTS_BUCKET is not set")
     source = request.get("source", "unknown")
-    week = _resolve_week(request)
+    week = _resolve_week(request)  # validation always comes first
     key = report_key(week)
+    if simulated_failure_enabled():
+        _log(event="simulated_failure", trigger=trigger, source=source, week=week, **context)
+        raise RuntimeError(f"simulated builder outage ({SIMULATE_FAILURE_ENV}=true) - test only")
     _log(event="build_started", trigger=trigger, source=source, week=week, **context)
 
     body = build_weekly_report(week)

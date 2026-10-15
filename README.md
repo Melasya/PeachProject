@@ -674,6 +674,15 @@ Use two different weeks so the two required files are distinct objects.
 5. **Retries and the DLQ.** `scripts/reports.sh poison` queues `{"week":"not-a-week"}`: the
    builder fails three times, 360 s apart, then `make reports-queues` shows it in the DLQ;
    `scripts/reports.sh dlq` shows it, `scripts/reports.sh dlq-purge --yes` clears it.
+5b. **Fix and redrive.** A poison message (bad input) stays bad, so the redrive demonstration uses
+   a valid request and a test-only outage: `scripts/deploy-reports.sh --simulate-failure` sets
+   `REPORTS_SIMULATE_FAILURE=true` on the builder, which then fails every *valid* request after
+   validation and before touching RDS or S3 (a bad week is still rejected as before). Queue one
+   request (`scripts/reports.sh now 2026-W39`), let it reach the DLQ, then "fix the builder" with a
+   plain `scripts/deploy-reports.sh` and use **Start DLQ redrive** on the DLQ in the SQS console:
+   the request returns, succeeds, writes `reports/2026-W39.csv` and sends one email. The switch is
+   only ever set by that command-line flag - never from `.env` - and every other deploy, including
+   `--image-only`, sets it back to `false`; the stack output `SimulateBuilderFailure` shows it.
 6. **Duplicate emails.** Rebuilding a week overwrites the same key - one object, but every
    successful write is a new ObjectCreated event, so each rebuild sends another email. The same
    happens if a builder writes the file and then fails before returning (the retry writes it

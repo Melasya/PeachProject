@@ -7,6 +7,10 @@
 #                                           REPORT_RECIPIENTS in .env)
 #   scripts/deploy-reports.sh --image-only  point the builder at peach-backend's
 #                                           current image, nothing else
+#   scripts/deploy-reports.sh --simulate-failure
+#                                           TEST ONLY: full deploy with the builder
+#                                           failing every valid request (DLQ redrive
+#                                           demo). Any later deploy turns it off.
 #
 # Network, image and database settings come from the peach-backend stack, so
 # deploy the backend (which also applies migrations) first. The database URL is
@@ -16,11 +20,18 @@
 set -euo pipefail
 
 MODE="full"
+# TEST ONLY (DLQ redrive demonstration): makes the builder fail every valid
+# request. Deliberately a command-line flag and never read from .env or the
+# environment, so it cannot stay on by accident: every deploy without it -
+# --image-only included - sets the builder back to "false".
+SIMULATE_FAILURE="false"
 case "${1:-}" in
   "") ;;
   --image-only) MODE="image" ;;
-  *) echo "usage: $0 [--image-only]" >&2; exit 2 ;;
+  --simulate-failure) SIMULATE_FAILURE="true" ;;
+  *) echo "usage: $0 [--image-only | --simulate-failure]" >&2; exit 2 ;;
 esac
+[[ $# -le 1 ]] || { echo "usage: $0 [--image-only | --simulate-failure]" >&2; exit 2; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Git Bash: aws.exe cannot open /c/... paths; C:/... works for it and for bash.
@@ -83,12 +94,18 @@ IMAGE_URI="$(backend_param ImageUri)"
 if [[ "${MODE}" == "image" ]]; then
   aws cloudformation describe-stacks --stack-name "${STACK_NAME}" >/dev/null 2>&1 \
     || { log "no ${STACK_NAME} stack - nothing to update"; exit 0; }
-  CURRENT="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
-    --query "Stacks[0].Parameters[?ParameterKey=='ImageUri'].ParameterValue" --output text)"
-  if [[ "${CURRENT}" == "${IMAGE_URI}" ]]; then
+  stack_param() {
+    aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
+      --query "Stacks[0].Parameters[?ParameterKey=='$1'].ParameterValue" --output text
+  }
+  CURRENT="$(stack_param ImageUri)"
+  FAILING="$(stack_param SimulateBuilderFailure)"
+  # Only skip when there is nothing to do: same image AND the test switch off.
+  if [[ "${CURRENT}" == "${IMAGE_URI}" && "${FAILING}" != "true" ]]; then
     log "${STACK_NAME} already uses the backend's image"
     exit 0
   fi
+  [[ "${FAILING}" == "true" ]] && warn "the builder's test failure switch is on - turning it off"
   log "pointing the report builder at ${IMAGE_URI##*/}"
   read -r -a KEYS <<<"$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
     --query "Stacks[0].Parameters[].ParameterKey" --output text)"
@@ -96,6 +113,9 @@ if [[ "${MODE}" == "image" ]]; then
   for key in "${KEYS[@]}"; do
     if [[ "${key}" == "ImageUri" ]]; then
       PARAMS+=("ParameterKey=ImageUri,ParameterValue=${IMAGE_URI}")
+    elif [[ "${key}" == "SimulateBuilderFailure" ]]; then
+      # Never carry the test switch over from a previous deploy.
+      PARAMS+=("ParameterKey=SimulateBuilderFailure,ParameterValue=false")
     else
       PARAMS+=("ParameterKey=${key},UsePreviousValue=true")
     fi
@@ -104,7 +124,7 @@ if [[ "${MODE}" == "image" ]]; then
     --use-previous-template --capabilities CAPABILITY_IAM \
     --parameters "${PARAMS[@]}" >/dev/null
   aws cloudformation wait stack-update-complete --stack-name "${STACK_NAME}"
-  log "builder updated"
+  log "builder updated (test failure switch: $(stack_param SimulateBuilderFailure))"
   exit 0
 fi
 
@@ -138,6 +158,10 @@ print(",".join(sorted({explicit.get(s) or main[0] for s in subnets})))
 SUBNET_COUNT="$(tr ',' '\n' <<<"${SUBNET_IDS}" | grep -c .)"
 RECIPIENT_COUNT="$(tr ',' '\n' <<<"${REPORT_RECIPIENTS}" | grep -c '[^[:space:]]')"
 log "stack ${STACK_NAME} in ${AWS_REGION}: ${SUBNET_COUNT} subnets, image ${IMAGE_URI##*/}, ${RECIPIENT_COUNT} recipient(s)"
+if [[ "${SIMULATE_FAILURE}" == "true" ]]; then
+  warn "TEST ONLY: the builder will FAIL every valid request (DLQ redrive demonstration)."
+  warn "Run scripts/deploy-reports.sh without --simulate-failure to turn it off again."
+fi
 
 # SES is configured separately and verified by hand; only warn here.
 SENDER_STATUS="$(aws sesv2 get-email-identity --email-identity "${REPORT_SENDER}" \
@@ -203,6 +227,7 @@ ROUTE_TABLES="${ROUTE_TABLES}" FUNCTION_SG="${FUNCTION_SG}" IMAGE_URI="${IMAGE_U
 ARCHITECTURE="${ARCHITECTURE}" DATABASE_URL_VALUE="${DATABASE_URL_VALUE}" \
 REPORT_TIMEZONE="${REPORT_TIMEZONE:-Europe/Kyiv}" ARTIFACT_BUCKET="${ARTIFACT_BUCKET}" \
 MAILER_KEY="${MAILER_KEY}" SCHEDULE_STATE="${REPORT_SCHEDULE_STATE:-ENABLED}" \
+SIMULATE_FAILURE="${SIMULATE_FAILURE}" \
 python3 - "${PARAMS_FILE}" <<'PY'
 import json, os, sys
 
@@ -223,6 +248,8 @@ params = {
     "ArtifactBucket": os.environ["ARTIFACT_BUCKET"],
     "MailerCodeKey": os.environ["MAILER_KEY"],
     "ScheduleState": os.environ["SCHEDULE_STATE"],
+    # Always explicit, so a deploy never inherits "true" from the previous one.
+    "SimulateBuilderFailure": os.environ["SIMULATE_FAILURE"],
 }
 with open(sys.argv[1], "w") as fh:
     json.dump([{"ParameterKey": k, "ParameterValue": v} for k, v in params.items()], fh)
@@ -260,5 +287,6 @@ echo
 echo "  builder    $(outputs BuilderFunctionName)   (logs: $(outputs BuilderLogGroupName))"
 echo "  mailer     $(outputs MailerFunctionName)   (logs: $(outputs MailerLogGroupName))"
 echo "  schedule   $(outputs ScheduleName)   Monday 07:00 Europe/Kyiv -> SQS"
+echo "  test failure switch   $(outputs SimulateBuilderFailure)"
 echo
 echo "Next: make report-now WEEK=2026-W39, then make reports-ls and make reports-logs."
