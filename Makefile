@@ -1,6 +1,6 @@
 COMPOSE := docker compose
 
-.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend deploy-auth github-role
+.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean seed-meetings shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend deploy-auth deploy-reports report-now reports-ls reports-logs reports-queues github-role
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +45,9 @@ fmt: ## Format both sides
 	$(COMPOSE) exec backend ruff format .
 	$(COMPOSE) exec frontend pnpm format
 
+seed-meetings: ## Insert demo meetings into the LOCAL Compose database: make seed-meetings week=2026-W40
+	$(COMPOSE) exec backend python -m app.reports.seed --week "$(week)" --yes
+
 shell-backend: ## Shell into the backend container
 	$(COMPOSE) exec backend bash
 
@@ -78,6 +81,21 @@ destroy-frontend: ## Delete the frontend stack (bucket + distribution)
 
 deploy-auth: ## Create/update the Cognito sign-in stack (user pool, Google, managed login); writes COGNITO_* to .env
 	./scripts/deploy-auth.sh
+
+deploy-reports: ## Create/update the weekly-report stack (scheduler -> SQS -> builder -> S3 -> mailer -> SES)
+	./scripts/deploy-reports.sh
+
+report-now: ## Queue a report request on SQS: make report-now WEEK=2026-W39 (no WEEK: last complete week)
+	./scripts/reports.sh now "$(WEEK)"
+
+reports-ls: ## List reports/ in the reports bucket
+	./scripts/reports.sh ls
+
+reports-logs: ## Trigger lines (schedule / sqs / s3) from the builder and mailer logs, last 24h
+	./scripts/reports.sh evidence
+
+reports-queues: ## Messages waiting / in flight on the report queue and its DLQ
+	./scripts/reports.sh queues
 
 github-role: ## Create the IAM role GitHub Actions assumes to deploy (OIDC, no keys)
 	./scripts/github-role.sh

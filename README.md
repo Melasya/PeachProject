@@ -76,6 +76,7 @@ Peach/
 │   ├── backend.yaml              # CloudFormation: Lambda + function URL + RDS PostgreSQL
 │   ├── frontend.yaml             # CloudFormation: S3 + CloudFront (+ optional custom domain)
 │   ├── auth.yaml                 # CloudFormation: Cognito user pool, Google, managed login
+│   ├── reports.yml               # CloudFormation: weekly report - scheduler, SQS, builder, S3, mailer
 │   └── github-oidc.yaml          # CloudFormation: the role Actions assumes
 │
 ├── scripts/
@@ -85,6 +86,8 @@ Peach/
 │   ├── domain-frontend.sh        # us-east-1 ACM certificate + DNS for the frontend's domain
 │   ├── destroy-frontend.sh       # delete the bucket and distribution
 │   ├── deploy-auth.sh            # Cognito stack (Google secret from .env) -> COGNITO_* in .env
+│   ├── deploy-reports.sh         # weekly-report stack (+ mailer zip); --image-only follows the backend
+│   ├── reports.sh                # queue a report, list/get reports, logs, queues, test helpers
 │   └── github-role.sh            # the OIDC role CI assumes to deploy
 │
 ├── backend/
@@ -592,7 +595,92 @@ gitignored `.env`. `make deploy-auth` hands the secret to CloudFormation as a `N
 through a `0600` file that is deleted on exit (`auth-params.json`, also gitignored). It is not in
 the repository, not in GitHub, and not in the frontend build. CI never deploys this stack.
 
-## 15. Where to take it next
+## 15. Weekly meetings report
+
+```
+EventBridge Scheduler (Monday 07:00 Europe/Kyiv)
+  -> SQS report-requests (DLQ after 3 receives)
+  -> builder Lambda (backend image, in the VPC; reads RDS)
+  -> S3 reports/<ISO-week>.csv (private, encrypted, 90-day expiry; via a free S3 gateway endpoint)
+  -> S3 ObjectCreated (prefix reports/, suffix .csv)
+  -> mailer Lambda (zip, outside the VPC)
+  -> SES
+```
+
+`infra/reports.yml` (stack `peach-reports`) holds all of it; nothing in the backend stack or the
+database changes. The data lives in `meetings` and `meeting_participants` (migration `0003`), and
+`app/reports/weekly.py` builds the CSV: one ISO week against the week before (meeting count, total
+hours, differences) and its five longest meetings. Weeks run Monday 00:00 to Monday 00:00 in
+Europe/Kyiv, and a meeting belongs to the week it starts in.
+
+- **Builder** (`app.reports.lambda_handler.handler`, the backend image with its command
+  overridden): reads SQS messages - `{"week":null,"source":"schedule"}` from the schedule,
+  `{"week":"2026-W39","source":"manual"}` from `make report-now` - or a direct schedule-shaped
+  event `{"source":"schedule"}` (the intermediate test only). No week means the last complete one.
+  It writes the deterministic key `reports/<week>.csv` and logs `trigger` (`sqs` / `direct`),
+  `source` and `week`. Any failure raises, so SQS retries the message (visibility timeout 360 s,
+  six times the 60 s timeout) and after three receives moves it to the DLQ. It runs in the
+  backend's subnets with the backend's security group, which RDS already admits, and gets
+  `DATABASE_URL` from the backend's secret at deploy time - no NAT gateway, no paid endpoint.
+- **Mailer** (`backend/app/reports/mailer.py`, deployed alone as a `python3.14` zip): invoked
+  straight by the bucket notification, reads the CSV and sends it with SES as an attachment. It
+  can only read `reports/*` and send as `REPORT_SENDER`; it never writes to S3 or touches RDS.
+
+```bash
+make deploy-reports              # needs REPORT_SENDER / REPORT_RECIPIENTS in .env
+make report-now WEEK=2026-W39    # queue a request on SQS (no WEEK: last complete week)
+make reports-ls                  # list reports/
+make reports-logs                # schedule / sqs / s3 trigger lines from both functions
+make reports-queues              # waiting / in-flight on the queue and the DLQ
+scripts/reports.sh get 2026-W39  # download a report into .reports/ (gitignored)
+bash scripts/reports.sh seed 2026-W41 --yes  # PRODUCTION data: replaces the demo meetings of 2026-W41 and 2026-W40
+```
+
+`reports.sh seed WEEK --yes` **changes production data**: it invokes the API function directly
+with `{"action":"seed_demo_meetings","week":WEEK,"confirm":true}`, which runs inside the VPC and
+replaces the demo meetings - titled `[demo] ...`, with `@example.com` addresses - of that week and
+the week before. Real meetings and `items` are never touched. Without `--yes` it stops; the action
+itself requires `"confirm": true` and is unreachable from the function URL.
+
+**Deploy order.** The builder runs the backend image, so the image must contain `app/reports`
+and production must be at migration `0003`: deploy the backend (CI does, on push) before
+`make deploy-reports`. While SES is in the sandbox, the sender and every recipient must be
+verified identities (`aws sesv2 create-email-identity`, then click the emailed link) - the stack
+never creates identities. The mailer zip goes to a private `<project>-artifacts-<account>-<region>`
+bucket the script creates, like the ECR repository, outside the stack.
+
+**Keeping the builder on the current image.** CloudFormation pins the builder to the image it was
+deployed with, and the ECR lifecycle keeps only the last three images, so after a few backend
+deploys the builder's image would be deleted. `scripts/deploy-reports.sh --image-only` points the
+builder at `peach-backend`'s current image and changes nothing else.
+
+### Test plan
+
+Use two different weeks so the two required files are distinct objects.
+
+0. **Data.** `bash scripts/reports.sh seed <last complete week> --yes` (production demo rows
+   for that week and the one before; see above).
+1. **Intermediate - direct, schedule-shaped.** `scripts/reports.sh invoke-direct 2026-W39`
+   (or no week for the last complete one). Expect `reports/2026-W39.csv`, a builder log line
+   with `"trigger": "direct", "source": "schedule"`, and a mailer line with `"trigger": "s3"`.
+2. **Final - schedule -> SQS -> builder.** `scripts/reports.sh schedule-once` creates a one-time
+   schedule with the weekly schedule's target, role and input, two minutes out, which deletes
+   itself afterwards. Expect the last complete week's file (e.g. `reports/2026-W41.csv`, not the
+   week from step 1) and builder lines with `"trigger": "sqs", "source": "schedule"`.
+3. **Manual through the queue.** `make report-now WEEK=2026-W40` -> `"trigger": "sqs",
+   "source": "manual"`.
+4. **Evidence.** `make reports-ls` (both files), `make reports-logs` (schedule / sqs / s3 lines),
+   the two emails with their CSV attachments.
+5. **Retries and the DLQ.** `scripts/reports.sh poison` queues `{"week":"not-a-week"}`: the
+   builder fails three times, 360 s apart, then `make reports-queues` shows it in the DLQ;
+   `scripts/reports.sh dlq` shows it, `scripts/reports.sh dlq-purge --yes` clears it.
+6. **Duplicate emails.** Rebuilding a week overwrites the same key - one object, but every
+   successful write is a new ObjectCreated event, so each rebuild sends another email. The same
+   happens if a builder writes the file and then fails before returning (the retry writes it
+   again), and S3 notifications are at-least-once. Expected; deduplicating would need state,
+   e.g. a conditional write, which this lab does not add.
+
+## 16. Where to take it next
 
 When the real domain arrives, replace the `Item` model, schemas, service, routes and the `/items`
 screen, and add an Alembic revision for the new tables. Everything else — config, database wiring,

@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:3000"]
     )
 
+    # ISO weeks in the weekly report run Monday 00:00 to Monday 00:00 here - the
+    # zone the schedule fires in.
+    report_timezone: str = "Europe/Kyiv"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

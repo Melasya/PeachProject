@@ -34,3 +34,7 @@ pgdata/
 infra-params.json
 # written by scripts/deploy-auth.sh; holds the Google client secret
 auth-params.json
+# written by scripts/deploy-reports.sh; holds the database URL
+reports-params.json
+# reports downloaded by scripts/reports.sh get
+.reports/

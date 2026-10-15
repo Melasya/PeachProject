@@ -12,6 +12,8 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
     "mangum>=0.22.0",
+    "tzdata>=2025.2",
+    "boto3>=1.40",
 ]
 
 [dependency-groups]
