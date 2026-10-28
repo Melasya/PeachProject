@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     # zone the schedule fires in.
     report_timezone: str = "Europe/Kyiv"
 
+    # Cognito access tokens guard /api/v1/meetings. Empty issuer or client id:
+    # those endpoints answer 503 rather than run unauthenticated.
+    cognito_issuer: str = ""
+    cognito_client_id: str = ""
+    # The user pool's JWKS as JSON, pinned at deploy time because the API
+    # Lambda has no internet access. Required in production; in development
+    # an empty value means fetch the keys from the issuer instead.
+    cognito_jwks: str = ""
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _split_origins(cls, value: object) -> object:

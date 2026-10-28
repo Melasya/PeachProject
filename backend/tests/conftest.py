@@ -1,7 +1,12 @@
+import json
 import os
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -83,3 +88,60 @@ async def client(session: AsyncSession) -> AsyncIterator[AsyncClient]:
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
     app.dependency_overrides.clear()
+
+
+# --- signed-in requests -------------------------------------------------------
+
+COGNITO_ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TEST"
+COGNITO_CLIENT_ID = "webclient123"
+SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def public_jwk(key: rsa.RSAPrivateKey, kid: str) -> dict[str, Any]:
+    data = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+    return {**data, "kid": kid, "alg": "RS256", "use": "sig"}
+
+
+def make_token(
+    key: rsa.RSAPrivateKey = SIGNING_KEY, kid: str = "k1", alg: str = "RS256", **claims: Any
+) -> str:
+    """A Cognito-shaped access token; override any claim, or set one to None to drop it."""
+    now = int(time.time())
+    payload = {
+        "iss": COGNITO_ISSUER,
+        "client_id": COGNITO_CLIENT_ID,
+        "token_use": "access",
+        "sub": "user-1",
+        "username": "olena",
+        "iat": now,
+        "exp": now + 600,
+        **claims,
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+    return jwt.encode(payload, key, algorithm=alg, headers={"kid": kid})
+
+
+def _reset_auth_caches() -> None:
+    from app.api.auth import _keys
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    _keys.cache_clear()
+
+
+@pytest.fixture
+def cognito(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[..., str]]:
+    """Configure the API like production - a pinned JWKS, no network - and mint tokens."""
+    monkeypatch.setenv("COGNITO_ISSUER", COGNITO_ISSUER)
+    monkeypatch.setenv("COGNITO_CLIENT_ID", COGNITO_CLIENT_ID)
+    monkeypatch.setenv("COGNITO_JWKS", json.dumps({"keys": [public_jwk(SIGNING_KEY, "k1")]}))
+    _reset_auth_caches()
+    yield make_token
+    _reset_auth_caches()
+
+
+@pytest.fixture
+async def api(client: AsyncClient, cognito: Callable[..., str]) -> AsyncClient:
+    """The test client, signed in as user-1."""
+    client.headers["Authorization"] = f"Bearer {cognito()}"
+    return client

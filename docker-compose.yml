@@ -31,6 +31,11 @@ services:
       APP_ENV: ${APP_ENV:-development}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      # /api/v1/meetings needs a Cognito access token from the same user pool
+      # the frontend signs in with. Locally the keys are fetched from the
+      # issuer; empty settings make those endpoints answer 503.
+      COGNITO_ISSUER: ${COGNITO_AUTHORITY:-}
+      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     healthcheck:
@@ -49,6 +54,7 @@ services:
         NEXT_PUBLIC_COGNITO_AUTHORITY: ${COGNITO_AUTHORITY:-}
         NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
         NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
+        NEXT_PUBLIC_PARSER_URL: ${PARSER_URL:-}
     restart: unless-stopped
     depends_on:
       backend:
@@ -60,6 +66,8 @@ services:
       NEXT_PUBLIC_COGNITO_AUTHORITY: ${COGNITO_AUTHORITY:-}
       NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
       NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
+      # The agenda parser's URL from make deploy-ai; empty disables parsing.
+      NEXT_PUBLIC_PARSER_URL: ${PARSER_URL:-}
       NODE_ENV: production
     ports:
       - "${FRONTEND_PORT:-3000}:3000"

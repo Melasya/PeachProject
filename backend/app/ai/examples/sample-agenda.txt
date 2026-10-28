@@ -1,0 +1,11 @@
+Sprint 42 planning - Monday 10:00, 90 minutes
+Organiser: Olena Kovalenko
+Attendees: Olena Kovalenko, Taras Melnyk, ivan.petrenko@example.com
+
+1. Review last sprint (Taras, 15 min)
+2. Pick stories for sprint 42 (30 min)
+3. Release checklist for v2.3
+
+Action items:
+- Taras to update the release notes by Friday
+- Ivan: fix the flaky login test

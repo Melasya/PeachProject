@@ -90,6 +90,15 @@ done
 
 log "signing in with ${COGNITO_AUTHORITY}"
 
+# The agenda parser is optional: without its stack the paste panel says AI
+# parsing is not configured, and the rest of the site is unchanged.
+PARSER_URL_VALUE="$(aws cloudformation describe-stacks \
+  --stack-name "${AI_STACK_NAME:-${PROJECT_NAME}-ai}" \
+  --query "Stacks[0].Outputs[?OutputKey=='ParserUrl'].OutputValue" --output text 2>/dev/null || true)"
+[[ "${PARSER_URL_VALUE}" == "None" ]] && PARSER_URL_VALUE=""
+PARSER_URL_VALUE="${PARSER_URL_VALUE%/}"
+log "agenda parser: ${PARSER_URL_VALUE:-not deployed}"
+
 # --- infrastructure ---------------------------------------------------------
 
 if ! aws cloudformation describe-stacks --stack-name "${STACK_NAME}" >/dev/null 2>&1; then
@@ -133,6 +142,7 @@ rm -rf "${APP}/out"
   NEXT_PUBLIC_COGNITO_AUTHORITY="${COGNITO_AUTHORITY}" \
   NEXT_PUBLIC_COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
   NEXT_PUBLIC_COGNITO_DOMAIN="${COGNITO_DOMAIN}" \
+  NEXT_PUBLIC_PARSER_URL="${PARSER_URL_VALUE}" \
   "${PM[@]}" build)
 [[ -f "${APP}/out/index.html" ]] || die "the export produced no out/index.html"
 

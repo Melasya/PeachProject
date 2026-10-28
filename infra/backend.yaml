@@ -97,6 +97,25 @@ Parameters:
     Default: "*"
     Description: Comma-separated browser origins; set this to the deployed frontend URL.
 
+  # Sign-in for /api/v1/meetings. The function has no internet access, so the
+  # user pool's public signing keys (JWKS) are fetched by deploy-backend.sh and
+  # pinned here. Empty: those endpoints answer 503; items and health are open.
+  CognitoIssuer:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^https://cognito-idp\\.[a-z0-9-]+\\.amazonaws\\.com/[A-Za-z0-9_-]+$"
+
+  CognitoClientId:
+    Type: String
+    Default: ""
+    AllowedPattern: "^[A-Za-z0-9]*$"
+
+  CognitoJwks:
+    Type: String
+    Default: ""
+    MaxLength: 4096
+    Description: The user pool's JWKS as compact JSON (public keys, not a secret).
+
   LogRetentionDays:
     Type: Number
     Default: 7
@@ -246,6 +265,9 @@ Resources:
           APP_ENV: !Ref AppEnv
           LOG_LEVEL: !Ref LogLevel
           CORS_ORIGINS: !Ref CorsOrigins
+          COGNITO_ISSUER: !Ref CognitoIssuer
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+          COGNITO_JWKS: !Ref CognitoJwks
           # No pool: warm but idle environments would keep connections open,
           # and Aurora only pauses once there are none.
           DB_POOLING: "false"

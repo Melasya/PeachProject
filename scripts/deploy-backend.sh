@@ -192,6 +192,41 @@ alphabet = string.ascii_letters + string.digits + "-_.~"
 print("".join(secrets.choice(alphabet) for _ in range(40)))')"
 fi
 
+# --- sign-in ----------------------------------------------------------------
+
+# /api/v1/meetings needs a Cognito access token. The function sits in the VPC
+# with no internet access, so it cannot fetch the user pool's signing keys
+# itself: fetch them here and pin them in the function's environment. They are
+# public keys. If Cognito ever rotates them, redeploy the backend.
+AUTH_STACK="${AUTH_STACK_NAME:-${PROJECT_NAME}-auth}"
+auth_output() {
+  aws cloudformation describe-stacks --stack-name "${AUTH_STACK}" \
+    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true
+}
+COGNITO_ISSUER="$(auth_output Authority)"
+COGNITO_CLIENT_ID="$(auth_output ClientId)"
+[[ "${COGNITO_ISSUER}" == "None" ]] && COGNITO_ISSUER=""
+[[ "${COGNITO_CLIENT_ID}" == "None" ]] && COGNITO_CLIENT_ID=""
+COGNITO_JWKS=""
+
+if [[ -n "${COGNITO_ISSUER}" && -n "${COGNITO_CLIENT_ID}" ]]; then
+  # Only the public RSA fields are kept; anything else in the document is dropped.
+  COGNITO_JWKS="$(ISSUER="${COGNITO_ISSUER}" python3 -c '
+import json, os, sys, urllib.request
+url = os.environ["ISSUER"].rstrip("/") + "/.well-known/jwks.json"
+with urllib.request.urlopen(url, timeout=10) as response:
+    keys = json.load(response)["keys"]
+fields = ("kty", "kid", "alg", "use", "n", "e")
+keys = [{f: k[f] for f in fields if f in k} for k in keys if k.get("kty") == "RSA"]
+if not keys:
+    sys.exit("no RSA keys in " + url)
+print(json.dumps({"keys": keys}, separators=(",", ":")))')" \
+    || die "could not fetch the user pool's signing keys from ${COGNITO_ISSUER}"
+  log "sign-in: ${AUTH_STACK}, $(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["keys"]))' "${COGNITO_JWKS}") signing key(s) pinned"
+else
+  warn "no sign-in settings from stack ${AUTH_STACK}: /api/v1/meetings will answer 503 until it exists"
+fi
+
 # --- deploy -----------------------------------------------------------------
 
 # Parameters go through a 0600 file rather than argv, so the password never
@@ -222,6 +257,9 @@ DB_SECONDS_UNTIL_AUTO_PAUSE="${DB_SECONDS_UNTIL_AUTO_PAUSE:-}" \
 APP_ENV="${APP_ENV_AWS:-production}" \
 LOG_LEVEL="${LOG_LEVEL:-info}" \
 CORS_ORIGINS="${API_CORS_ORIGINS:-}" \
+COGNITO_ISSUER="${COGNITO_ISSUER}" \
+COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID}" \
+COGNITO_JWKS="${COGNITO_JWKS}" \
 python3 - "${PARAMS_FILE}" <<'PY'
 import json, os, sys
 
@@ -243,6 +281,9 @@ params = {
     "AppEnv": os.environ["APP_ENV"],
     "LogLevel": os.environ["LOG_LEVEL"],
     "CorsOrigins": os.environ["CORS_ORIGINS"],
+    "CognitoIssuer": os.environ["COGNITO_ISSUER"],
+    "CognitoClientId": os.environ["COGNITO_CLIENT_ID"],
+    "CognitoJwks": os.environ["COGNITO_JWKS"],
 }
 # An empty value means "leave this alone": CloudFormation reuses the stack's
 # existing value for any parameter the deploy does not mention, and falls back

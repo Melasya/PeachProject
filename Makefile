@@ -1,6 +1,6 @@
 COMPOSE := docker compose
 
-.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean seed-meetings shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend deploy-auth deploy-reports report-now reports-ls reports-logs reports-queues github-role
+.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean seed-meetings shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend deploy-auth deploy-reports deploy-ai parse llm-hello report-now reports-ls reports-logs reports-queues github-role
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -96,6 +96,17 @@ reports-logs: ## Trigger lines (schedule / sqs / s3) from the builder and mailer
 
 reports-queues: ## Messages waiting / in flight on the report queue and its DLQ
 	./scripts/reports.sh queues
+
+deploy-ai: ## Create/update the agenda-parser stack (Lambda outside the VPC -> Claude on Bedrock); writes PARSER_URL to .env
+	./scripts/deploy-ai.sh
+
+# Both call Amazon Bedrock with your local AWS credentials (read-only mount) and cost a
+# fraction of a cent; DRY_RUN=1 prints the request instead and calls nothing.
+parse: ## Parse an agenda file locally: make parse FILE=app/ai/examples/sample-agenda.txt [DRY_RUN=1]
+	$(COMPOSE) run --rm --no-deps -v "$(HOME)/.aws:/root/.aws:ro" -e AWS_PROFILE -e AWS_REGION=$${AWS_REGION:-us-east-1} backend python -m app.ai.cli parse --file "$(or $(FILE),app/ai/examples/sample-agenda.txt)" $(if $(DRY_RUN),--dry-run)
+
+llm-hello: ## One tiny Bedrock call to check model access (costs a fraction of a cent)
+	$(COMPOSE) run --rm --no-deps -v "$(HOME)/.aws:/root/.aws:ro" -e AWS_PROFILE -e AWS_REGION=$${AWS_REGION:-us-east-1} backend python -m app.ai.cli hello
 
 github-role: ## Create the IAM role GitHub Actions assumes to deploy (OIDC, no keys)
 	./scripts/github-role.sh

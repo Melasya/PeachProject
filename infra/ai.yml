@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Peach agenda parser: a Lambda (the backend image, handler
+  app.ai.lambda_handler.handler) that turns pasted agenda text into suggested
+  meeting fields with Claude on Amazon Bedrock. It runs outside the VPC - it
+  needs Bedrock and Cognito's public signing keys, never the database - and
+  answers on its own function URL. The browser sends the Cognito access token;
+  the function verifies it itself, so the URL's AuthType is NONE. Saving still
+  goes through the validated meetings API.
+
+  Deployed by scripts/deploy-ai.sh. No NAT, no endpoints, nothing hourly:
+  Lambda bills per request, Bedrock per token.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: peach
+
+  ImageUri:
+    Type: String
+    Description: The backend image (peach-backend's ImageUri); the parser overrides its command.
+
+  Architecture:
+    Type: String
+    Default: arm64
+    AllowedValues: [arm64, x86_64]
+
+  ParserModel:
+    Type: String
+    Default: anthropic.claude-opus-5-5
+    Description: Claude model ID on Amazon Bedrock (anthropic. prefix) - PARSER_MODEL.
+
+  ParserFallbackModel:
+    Type: String
+    Default: anthropic.claude-opus-4-8
+    Description: Model the client-side refusal fallback retries on.
+
+  ParserEffort:
+    Type: String
+    Default: low
+    AllowedValues: [low, medium, high]
+
+  CognitoIssuer:
+    Type: String
+    AllowedPattern: "^https://cognito-idp\\.[a-z0-9-]+\\.amazonaws\\.com/[A-Za-z0-9_-]+$"
+    Description: peach-auth's Authority output.
+
+  CognitoClientId:
+    Type: String
+    MinLength: 1
+    Description: peach-auth's ClientId output; access tokens must carry it.
+
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Description: Browser origins allowed by CORS - the deployed site and local dev.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+  ParserLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-agenda-parser"
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ParserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Logs only - no VPC access, no database.
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: call-claude-on-bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Claude in Amazon Bedrock (the Messages API on bedrock-mantle)
+              # authorises one action. Its model resource ARN format was not
+              # confirmed when this was written, so the single action is not
+              # narrowed by resource yet - tighten Resource once it is.
+              - Sid: InvokeClaude
+                Effect: Allow
+                Action: bedrock-mantle:CreateInference
+                Resource: "*"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ParserFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-agenda-parser"
+      Description: Suggests meeting fields from pasted agenda text (Claude on Bedrock)
+      PackageType: Image
+      Code:
+        ImageUri: !Ref ImageUri
+      ImageConfig:
+        Command: [app.ai.lambda_handler.handler]
+      Architectures: [!Ref Architecture]
+      MemorySize: 512
+      # Up to two model calls (one validation retry), each bounded by the SDK timeout.
+      Timeout: 120
+      Role: !GetAtt ParserRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref ParserLogGroup
+      # No VpcConfig on purpose: outside the VPC it reaches Bedrock and Cognito
+      # directly, and it has no route to RDS at all.
+      Environment:
+        Variables:
+          PARSER_MODEL: !Ref ParserModel
+          PARSER_FALLBACK_MODEL: !Ref ParserFallbackModel
+          PARSER_EFFORT: !Ref ParserEffort
+          PARSER_TIMEZONE: Europe/Kyiv
+          COGNITO_ISSUER: !Ref CognitoIssuer
+          COGNITO_CLIENT_ID: !Ref CognitoClientId
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  # CORS is answered here, not in the handler, so headers are never doubled.
+  ParserUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref ParserFunction
+      AuthType: NONE
+      Cors:
+        AllowOrigins: !Ref AllowedOrigins
+        AllowMethods: [POST]
+        AllowHeaders: [authorization, content-type]
+        MaxAge: 300
+
+  # A public function URL needs both grants, as on the API function.
+  ParserUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ParserFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  ParserUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ParserFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  ParserUrl:
+    Description: Base URL of the agenda parser - NEXT_PUBLIC_PARSER_URL.
+    Value: !GetAtt ParserUrl.FunctionUrl
+
+  ParserFunctionName:
+    Value: !Ref ParserFunction
+
+  ParserLogGroupName:
+    Value: !Ref ParserLogGroup
+
+  ParserModel:
+    Value: !Ref ParserModel
