@@ -37,7 +37,7 @@ def meeting(**overrides) -> dict:
         "action_items": [{"description": "Send notes", "owner": "Taras", "due_date": "2031-03-07"}],
         "ai": {
             "suggestion": SUGGESTION,
-            "model": "anthropic.claude-opus-5-5",
+            "model": "gemini-3.5-flash-lite",
             "prompt_version": "agenda-v1",
         },
     }
@@ -60,7 +60,7 @@ async def test_create_and_read_back(api: AsyncClient) -> None:
     # The original suggestion is kept as it was - typo and all - with what produced it.
     assert body["ai_suggestion"] == SUGGESTION
     assert (body["ai_model"], body["ai_prompt_version"]) == (
-        "anthropic.claude-opus-5-5",
+        "gemini-3.5-flash-lite",
         "agenda-v1",
     )
     assert body["created_by"] == "user-1"  # from the token

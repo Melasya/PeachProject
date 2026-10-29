@@ -1,7 +1,8 @@
 """Agenda parser Lambda: POST pasted text, get suggested meeting fields back.
 
-Runs outside the VPC (it needs Bedrock and Cognito's signing keys, not RDS)
-behind its own function URL, with handler ``app.ai.lambda_handler.handler``.
+Runs outside the VPC (it needs the Gemini API, SSM for its key and Cognito's
+signing keys, not RDS) behind its own function URL, with handler
+``app.ai.lambda_handler.handler``.
 It never touches the database: the browser saves the edited result through
 the validated meetings API. CORS is answered by the function URL itself.
 
@@ -12,10 +13,10 @@ the validated meetings API. CORS is answered by the function URL itself.
     400 bad JSON · 401 no/invalid token · 405 not POST · 413 over 10,000 chars
     422 empty text, bad date/zone, or the model declined · 429 throttled
     502 the model's answer did not validate after a retry, or upstream error
-    503 sign-in or model access not configured · 504 the model timed out
+    503 sign-in, the API key or model access not configured · 504 the model timed out
 
 Each request logs one JSON line - model, prompt version, tokens, latency,
-estimated cost, outcome - and never the pasted text.
+estimated cost, outcome - and never the pasted text or the API key.
 """
 
 import base64
@@ -36,6 +37,7 @@ from app.ai.agenda import (
     EmptyAgendaText,
     parse_agenda,
 )
+from app.ai.api_key import ApiKeyNotConfigured, ApiKeyUnavailable
 from app.auth import AuthError, AuthNotConfigured, bearer_token, verify_access_token
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,20 @@ def _error(status: int, detail: str, **headers: str) -> dict:
 
 def _log(**fields: Any) -> None:
     logger.info(json.dumps({"component": "agenda-parser", **fields}, default=str))
+
+
+def _upstream(error: Any) -> tuple[int, str, str]:
+    """A Gemini API error as (status, outcome, detail) for the browser."""
+    code = getattr(error, "code", None)
+    if code == 429:
+        return 429, "throttled", "too many requests to the model - try again"
+    if code == 504:
+        return 504, "timeout", "the model took too long - try again"
+    # A bad key comes back as 400 INVALID_ARGUMENT; a disabled one as 401/403.
+    bad_key = code == 400 and "api key" in str(getattr(error, "message", "") or "").lower()
+    if code in (401, 403, 404) or bad_key:
+        return 503, "model_unavailable", "the model is not available to this service"
+    return 502, "upstream_error", "the model service failed - try again"
 
 
 def _body(event: dict[str, Any]) -> dict[str, Any]:
@@ -130,8 +146,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     except ZoneInfoNotFoundError, ValueError, TypeError:
         return done(422, "bad_context", _error(422, "today must be YYYY-MM-DD and tz a zone name"))
 
-    import anthropic
+    import httpx
+    from google.genai import errors
 
+    # Upstream messages are never logged or returned: only fixed text and the status.
     try:
         result = parse_agenda(text, today, str(tz_name))
     except (EmptyAgendaText, AgendaTextTooLong) as error:  # re-checked inside; kept for safety
@@ -142,15 +160,16 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         return done(
             502, "invalid_after_retry", _error(502, "could not get a valid suggestion - try again")
         )
-    except anthropic.RateLimitError:
-        return done(429, "throttled", _error(429, "too many requests to the model - try again"))
-    except anthropic.APITimeoutError:
+    except ApiKeyNotConfigured:
+        return done(503, "api_key_not_configured", _error(503, "AI parsing is not configured"))
+    except ApiKeyUnavailable:
+        return done(503, "api_key_unavailable", _error(503, "AI parsing is unavailable, try again"))
+    except errors.APIError as error:
+        status, outcome, detail = _upstream(error)
+        return done(status, outcome, _error(status, detail), upstream_status=error.code)
+    except httpx.TimeoutException:
         return done(504, "timeout", _error(504, "the model took too long - try again"))
-    except anthropic.PermissionDeniedError, anthropic.NotFoundError:
-        return done(
-            503, "model_unavailable", _error(503, "the model is not available to this account")
-        )
-    except anthropic.APIStatusError, anthropic.APIConnectionError:
+    except httpx.TransportError:
         return done(502, "upstream_error", _error(502, "the model service failed - try again"))
 
     return done(

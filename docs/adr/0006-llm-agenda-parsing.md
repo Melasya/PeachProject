@@ -1,6 +1,8 @@
 # ADR 0006: Parse pasted agendas with Claude on Amazon Bedrock
 
-- Status: Accepted (implemented locally; not yet deployed)
+- Status: Accepted; decision 1 (model and access) superseded by
+  [ADR 0007](0007-gemini-instead-of-bedrock.md) - the parser now calls the Gemini API. Every
+  other decision here still holds.
 - Date: 2026-10-17
 - Context: Lab 6, "Paste it, check it, save it: an LLM in the product"
 

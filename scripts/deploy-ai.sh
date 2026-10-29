@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Create or update the agenda-parser stack (infra/ai.yml): a Lambda outside the
-# VPC that suggests meeting fields with Claude on Amazon Bedrock, behind its
-# own function URL. Everything it needs is read from the other stacks - the
+# VPC that suggests meeting fields with Google's Gemini API, behind its own
+# function URL. Everything it needs is read from the other stacks - the
 # image from peach-backend, the issuer and client from peach-auth, the site
 # origin from peach-frontend - so nothing is copied by hand. Writes PARSER_URL
 # to .env for deploy-frontend.sh and Compose.
 #
-# Bedrock model access for PARSER_MODEL must be enabled in the account first;
-# this script makes no model call.
+# The Gemini API key must already be in SSM Parameter Store as a SecureString
+# named GEMINI_API_KEY_PARAMETER (default /peach/gemini-api-key) - see README
+# section 16. This script checks the parameter exists without reading its
+# value, never handles the key itself, and makes no model call.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,9 +38,9 @@ PROJECT_NAME="${PROJECT_NAME:-peach}"
 STACK_NAME="${AI_STACK_NAME:-${PROJECT_NAME}-ai}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 export AWS_DEFAULT_REGION="${AWS_REGION}"
-PARSER_MODEL="${PARSER_MODEL:-anthropic.claude-opus-5-5}"
-PARSER_FALLBACK_MODEL="${PARSER_FALLBACK_MODEL:-anthropic.claude-opus-4-8}"
+PARSER_MODEL="${PARSER_MODEL:-gemini-3.5-flash-lite}"
 PARSER_EFFORT="${PARSER_EFFORT:-low}"
+KEY_PARAMETER="${GEMINI_API_KEY_PARAMETER:-/${PROJECT_NAME}/gemini-api-key}"
 LOCAL_URL="${LOCAL_URL:-http://localhost:${FRONTEND_PORT:-3000}}"
 
 command -v aws >/dev/null 2>&1 || die "aws cli is required"
@@ -64,8 +66,16 @@ need "${CLIENT_ID}" "no ClientId on ${PROJECT_NAME}-auth - run make deploy-auth 
 need "${SITE_URL}" "no SiteUrl on ${PROJECT_NAME}-frontend - run make deploy-frontend first"
 SITE_URL="${SITE_URL%/}"
 
+# describe-parameters returns metadata only - never the value.
+KEY_TYPE="$(MSYS_NO_PATHCONV=1 aws ssm describe-parameters \
+  --parameter-filters "Key=Name,Values=${KEY_PARAMETER}" \
+  --query 'Parameters[0].Type' --output text 2>/dev/null || true)"
+[[ "${KEY_TYPE}" == "SecureString" ]] \
+  || die "no SecureString ${KEY_PARAMETER} in SSM (found: ${KEY_TYPE:-nothing}) - create it first (README section 16)"
+
 log "stack ${STACK_NAME} in ${AWS_REGION}: image ${IMAGE_URI##*/}, model ${PARSER_MODEL}"
 log "CORS origins ${SITE_URL}, ${LOCAL_URL}"
+log "API key from SSM ${KEY_PARAMETER} (read by the function at run time)"
 
 if ! aws cloudformation deploy \
   --stack-name "${STACK_NAME}" \
@@ -75,8 +85,8 @@ if ! aws cloudformation deploy \
     "ImageUri=${IMAGE_URI}" \
     "Architecture=${ARCHITECTURE:-arm64}" \
     "ParserModel=${PARSER_MODEL}" \
-    "ParserFallbackModel=${PARSER_FALLBACK_MODEL}" \
     "ParserEffort=${PARSER_EFFORT}" \
+    "GeminiApiKeyParameter=${KEY_PARAMETER}" \
     "CognitoIssuer=${ISSUER}" \
     "CognitoClientId=${CLIENT_ID}" \
     "AllowedOrigins=${SITE_URL},${LOCAL_URL}" \

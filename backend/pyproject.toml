@@ -14,8 +14,8 @@ dependencies = [
     "mangum>=0.22.0",
     "tzdata>=2025.2",
     "boto3>=1.40",
-    "anthropic[bedrock]>=1",
     "pyjwt[crypto]>=2.10",
+    "google-genai>=2,<3",
 ]
 
 [dependency-groups]

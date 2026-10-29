@@ -25,8 +25,8 @@ const agenda: ParseResponse["agenda"] = {
 
 const suggestion: ParseResponse = {
   agenda,
-  model: "anthropic.claude-opus-5-5",
-  requested_model: "anthropic.claude-opus-5-5",
+  model: "gemini-3.5-flash-lite",
+  requested_model: "gemini-3.5-flash-lite",
   prompt_version: "agenda-v1",
   attempts: 1,
   usage: { input_tokens: 1, output_tokens: 1 },
@@ -113,7 +113,7 @@ describe("formToMeeting", () => {
     // Provenance is the original suggestion, not the edited form.
     expect(payload.ai).toEqual({
       suggestion: agenda,
-      model: "anthropic.claude-opus-5-5",
+      model: "gemini-3.5-flash-lite",
       prompt_version: "agenda-v1",
     });
   });

@@ -689,12 +689,12 @@ Use two different weeks so the two required files are distinct objects.
    again), and S3 notifications are at-least-once. Expected; deduplicating would need state,
    e.g. a conditional write, which this lab does not add.
 
-## 16. Paste an agenda (Claude on Bedrock)
+## 16. Paste an agenda (Gemini API)
 
 ```
 /meetings (browser, signed in)
   -> POST pasted text + Cognito access token -> agenda parser Lambda (Function URL, outside the VPC)
-       verify JWT -> Claude on Bedrock (record_agenda tool) -> Pydantic validation (one retry) -> grounding
+       verify JWT -> Gemini API (forced record_agenda call) -> Pydantic validation (one retry) -> grounding
   <- suggestion + model + prompt_version + usage          (nothing is saved)
   -> the user reviews and edits every field
   -> POST /api/v1/meetings + the same access token (the validated API, in the VPC)
@@ -702,16 +702,17 @@ Use two different weeks so the two required files are distinct objects.
 ```
 
 - **Parser** (`backend/app/ai/`, stack `peach-ai` in `infra/ai.yml`). It runs the backend image
-  with the command `app.ai.lambda_handler.handler`. It runs outside the VPC (Bedrock without a
-  NAT gateway) and never imports the database layer.
-  - Model: `PARSER_MODEL` (default `anthropic.claude-opus-5-5`); on refusal it falls back to
-    `PARSER_FALLBACK_MODEL` (default `anthropic.claude-opus-4-8`).
-  - `PARSER_EFFORT` defaults to `low`. Prompt version: `agenda-v1`.
+  with the command `app.ai.lambda_handler.handler`. It runs outside the VPC (it reaches the
+  Gemini API and SSM without a NAT gateway) and never imports the database layer.
+  - Model: `PARSER_MODEL` (default `gemini-3.5-flash-lite`, Google's official `google-genai` SDK).
+    The function call is forced (mode `ANY`). Lab 6 first used Claude on Amazon Bedrock; the
+    account's Bedrock inference quotas were 0, so it moved to Gemini (ADR 0007).
+  - `PARSER_EFFORT` is the Gemini thinking level, default `low`. Prompt version: `agenda-v1`.
   - Missing facts come back as `null`. Names that do not appear in the text are dropped and
     listed in `ungrounded`.
   - Pasted text is wrapped in `<pasted_text>` and treated as data.
   - Each request logs one JSON line (`component: agenda-parser`) with the model, prompt
-    version, tokens, latency and estimated USD cost. It never logs the text.
+    version, tokens, latency and estimated USD cost. It never logs the text or the API key.
 - **HTTP contract.** `POST {"text": "...", "today": "YYYY-MM-DD", "tz": "Europe/Kyiv"}` with
   `Authorization: Bearer <access token>`.
 
@@ -723,10 +724,10 @@ Use two different weeks so the two required files are distinct objects.
   | 405 | Not a POST |
   | 413 | Text over 10,000 characters |
   | 422 | Empty text, bad `tz`/`today`, or the model refused |
-  | 429 | Bedrock throttling |
-  | 502 | Invalid output twice, or a Bedrock error |
-  | 503 | Not configured, JWKS unreachable, or no model access |
-  | 504 | Bedrock timeout |
+  | 429 | Gemini rate limit (free-tier limits are low) |
+  | 502 | Invalid output twice, or a Gemini error |
+  | 503 | Sign-in or API key not configured, JWKS or SSM unreachable, bad key, or unknown model |
+  | 504 | Gemini timeout |
 
 - **Meetings API.** `GET/POST /api/v1/meetings` and `GET /api/v1/meetings/{id}`.
   - Migration `0004` adds agenda items, action items, the three `ai_*` columns and
@@ -749,23 +750,36 @@ Use two different weeks so the two required files are distinct objects.
   works by hand.
 
 ```bash
-make llm-hello                   # one tiny Bedrock call: is the model enabled for this account?
-make parse DRY_RUN=1             # print the request for the sample agenda, no call
-make parse                       # parse backend/app/ai/examples/sample-agenda.txt (one paid call)
+make llm-hello                   # one tiny Gemini call: do the key and the model work?
+make parse DRY_RUN=1             # print the request for the sample agenda, no call, no key
+make parse                       # parse backend/app/ai/examples/sample-agenda.txt (one call)
 make parse FILE=path/in/backend/agenda.txt
 make deploy-ai                   # stack peach-ai; writes PARSER_URL to .env
 make deploy-frontend             # rebuilds the site with NEXT_PUBLIC_PARSER_URL
 ```
 
-`make parse` and `make llm-hello` use your local AWS profile (`~/.aws`, mounted read-only into
-the backend container). Each real call costs a fraction of a cent. Design notes:
-[ADR 0006](docs/adr/0006-llm-agenda-parsing.md), [C4 level 2](docs/architecture/c4-container.md).
+**The Gemini API key stays on the backend.** It is never in code, in git, in a log line, in a
+`NEXT_PUBLIC_*` variable or in the browser; the browser only ever talks to the parser Lambda.
+- *Locally:* put `GEMINI_API_KEY=...` in `.env` (git-ignored). `make parse` and
+  `make llm-hello` source `.env` and hand only that variable to the container, by name.
+- *On Lambda:* create an SSM Parameter Store **SecureString** named `/peach/gemini-api-key`
+  yourself (console, or `aws ssm put-parameter --type SecureString` reading the value from a
+  file, not typed on the command line). The stack receives only the name; the function reads
+  and decrypts the value once per container. `deploy-ai.sh` checks the parameter exists with
+  `describe-parameters`, which never returns the value. A standard parameter is free.
+- *Privacy:* on Gemini's free tier Google may use what is sent to improve its products. Paste
+  only test agendas (fictional names, `@example.com` addresses), never real personal data.
+
+Each call is free on the free tier and a fraction of a cent on the paid tier. Design notes:
+[ADR 0006](docs/adr/0006-llm-agenda-parsing.md), [ADR 0007](docs/adr/0007-gemini-instead-of-bedrock.md),
+[C4 level 2](docs/architecture/c4-container.md).
 
 **Deploy order:**
 1. Push. CI deploys the backend image and applies migration `0004`.
-2. `make deploy-ai`. It reads the image from `peach-backend`, the issuer and client ID from
+2. Create the SSM SecureString `/peach/gemini-api-key` (once).
+3. `make deploy-ai`. It reads the image from `peach-backend`, the issuer and client ID from
    `peach-auth`, and the site URL from `peach-frontend` for CORS.
-3. `make deploy-frontend`.
+4. `make deploy-frontend`.
 
 ### Test plan
 
@@ -786,7 +800,7 @@ the backend container). Each real call costs a fraction of a cent. Design notes:
    Save are disabled. `curl "$BACKEND_URL/api/v1/meetings"` with no token → 401;
    `/api/v1/items` still answers 200.
 5. **Input limit.** More than 10,000 characters → the counter turns red and Parse is disabled.
-   Sending it anyway with curl and a valid token → 413, with no Bedrock call: no tokens in the
+   Sending it anyway with curl and a valid token → 413, with no Gemini call: no tokens in the
    log line.
 
 **Evidence.** For each test, the parser's log line in `/aws/lambda/peach-agenda-parser`: outcome,

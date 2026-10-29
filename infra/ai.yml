@@ -3,14 +3,18 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   Peach agenda parser: a Lambda (the backend image, handler
   app.ai.lambda_handler.handler) that turns pasted agenda text into suggested
-  meeting fields with Claude on Amazon Bedrock. It runs outside the VPC - it
-  needs Bedrock and Cognito's public signing keys, never the database - and
-  answers on its own function URL. The browser sends the Cognito access token;
+  meeting fields with Google's Gemini API. It runs outside the VPC - it needs
+  the Gemini API, SSM (for its API key) and Cognito's public signing keys,
+  never the database - and answers on its own function URL. The browser sends the Cognito access token;
   the function verifies it itself, so the URL's AuthType is NONE. Saving still
   goes through the validated meetings API.
 
+  The Gemini API key lives in an SSM SecureString you create yourself; this
+  stack only knows its name, and the function reads it at run time. The key is
+  never in the template, a stack parameter or an environment variable.
+
   Deployed by scripts/deploy-ai.sh. No NAT, no endpoints, nothing hourly:
-  Lambda bills per request, Bedrock per token.
+  Lambda bills per request; Gemini is billed by Google, per token.
 
 Parameters:
   ProjectName:
@@ -28,18 +32,22 @@ Parameters:
 
   ParserModel:
     Type: String
-    Default: anthropic.claude-opus-5-5
-    Description: Claude model ID on Amazon Bedrock (anthropic. prefix) - PARSER_MODEL.
-
-  ParserFallbackModel:
-    Type: String
-    Default: anthropic.claude-opus-4-8
-    Description: Model the client-side refusal fallback retries on.
+    Default: gemini-3.5-flash-lite
+    AllowedPattern: "^gemini-[a-z0-9.-]+$"
+    Description: Gemini model code - PARSER_MODEL.
 
   ParserEffort:
     Type: String
     Default: low
     AllowedValues: [low, medium, high]
+    Description: Gemini thinking level - PARSER_EFFORT.
+
+  GeminiApiKeyParameter:
+    Type: String
+    Default: /peach/gemini-api-key
+    AllowedPattern: "^/[A-Za-z0-9_./-]+$"
+    Description: >-
+      Name (not value) of the SSM SecureString that holds the Gemini API key.
 
   CognitoIssuer:
     Type: String
@@ -84,18 +92,17 @@ Resources:
         # Logs only - no VPC access, no database.
         - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
       Policies:
-        - PolicyName: call-claude-on-bedrock
+        - PolicyName: read-gemini-api-key
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Claude in Amazon Bedrock (the Messages API on bedrock-mantle)
-              # authorises one action. Its model resource ARN format was not
-              # confirmed when this was written, so the single action is not
-              # narrowed by resource yet - tighten Resource once it is.
-              - Sid: InvokeClaude
+              # This one parameter only. It is encrypted with the AWS-managed
+              # aws/ssm key, whose key policy already lets SSM decrypt for
+              # callers allowed to read the parameter - no kms grant needed.
+              - Sid: ReadGeminiApiKey
                 Effect: Allow
-                Action: bedrock-mantle:CreateInference
-                Resource: "*"
+                Action: ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${GeminiApiKeyParameter}"
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
@@ -104,7 +111,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: !Sub "${ProjectName}-agenda-parser"
-      Description: Suggests meeting fields from pasted agenda text (Claude on Bedrock)
+      Description: Suggests meeting fields from pasted agenda text (Gemini API)
       PackageType: Image
       Code:
         ImageUri: !Ref ImageUri
@@ -117,13 +124,14 @@ Resources:
       Role: !GetAtt ParserRole.Arn
       LoggingConfig:
         LogGroup: !Ref ParserLogGroup
-      # No VpcConfig on purpose: outside the VPC it reaches Bedrock and Cognito
-      # directly, and it has no route to RDS at all.
+      # No VpcConfig on purpose: outside the VPC it reaches the Gemini API, SSM
+      # and Cognito directly, and it has no route to RDS at all.
       Environment:
         Variables:
           PARSER_MODEL: !Ref ParserModel
-          PARSER_FALLBACK_MODEL: !Ref ParserFallbackModel
           PARSER_EFFORT: !Ref ParserEffort
+          # The parameter's name; the key itself is read from SSM at run time.
+          GEMINI_API_KEY_PARAMETER: !Ref GeminiApiKeyParameter
           PARSER_TIMEZONE: Europe/Kyiv
           COGNITO_ISSUER: !Ref CognitoIssuer
           COGNITO_CLIENT_ID: !Ref CognitoClientId

@@ -29,8 +29,8 @@ const suggestion: ParseResponse = {
     agenda_items: [{ title: "Demo", owner: "Taras", duration_minutes: 15 }],
     action_items: [],
   },
-  model: "anthropic.claude-opus-5-5",
-  requested_model: "anthropic.claude-opus-5-5",
+  model: "gemini-3.5-flash-lite",
+  requested_model: "gemini-3.5-flash-lite",
   prompt_version: "agenda-v1",
   attempts: 1,
   usage: { input_tokens: 900, output_tokens: 300 },
@@ -101,7 +101,7 @@ describe("MeetingPlanner", () => {
     expect(payload.title).toBe("Sprint 42 planning");
     expect(payload.ai).toEqual({
       suggestion: suggestion.agenda,
-      model: "anthropic.claude-opus-5-5",
+      model: "gemini-3.5-flash-lite",
       prompt_version: "agenda-v1",
     });
   });

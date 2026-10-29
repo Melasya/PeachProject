@@ -16,6 +16,10 @@ const sections = [
     body: "This information is used only to authenticate you and to display your account information in Peach, such as the email address shown in the header.",
   },
   {
+    title: "Pasting an agenda",
+    body: "If you use Paste an agenda, the text you paste is sent to Google's Gemini API to suggest the meeting's fields. Peach does not keep the pasted text, only the meeting you review and save. Google may use the text to improve its products, so do not paste confidential or personal information.",
+  },
+  {
     title: "Sharing",
     body: "Peach does not sell your personal information.",
   },

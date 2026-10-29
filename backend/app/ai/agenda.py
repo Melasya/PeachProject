@@ -1,4 +1,4 @@
-"""Turn a pasted meeting agenda into suggested form fields, with Claude on Amazon Bedrock.
+"""Turn a pasted meeting agenda into suggested form fields, with Gemini (Google's Gemini API).
 
 The model only *suggests*: the result fills the meeting form, the person edits
 it, and saving goes through the validated meetings API like any other meeting.
@@ -9,17 +9,15 @@ How the answer is kept honest:
 - The pasted text is data. It is wrapped in <pasted_text> tags, any such tags
   inside it are neutralised, and the system prompt says instructions found in
   it are not to be followed.
-- The model must answer through the ``record_agenda`` tool, whose schema makes
-  every field explicit and nullable: a missing fact is ``null``, never a guess.
-- The tool input is validated with Pydantic. If it does not validate - or no
-  tool call came back - the model gets the errors and one more try.
+- The model must answer through the ``record_agenda`` function, whose schema
+  makes every field explicit and nullable: a missing fact is ``null``, never a
+  guess. Function calling is forced (mode ANY), so a plain-text answer is rare.
+- The function arguments are validated with Pydantic. If they do not validate -
+  or no call came back - the model gets the errors and one more try.
 - People the text never names are dropped after validation (organiser,
   participants, owners): a name that is not in the text was invented.
 
-Claude Opus 5.5 rejects forced ``tool_choice``, so the call uses ``auto`` with
-the instruction in the prompt and checks that the tool was actually called.
-Bedrock's Claude endpoint has no server-side refusal fallback; the client-side
-middleware retries a refused request on PARSER_FALLBACK_MODEL instead.
+The API key is read on the backend only - see ``app.ai.api_key``.
 """
 
 import os
@@ -31,21 +29,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 PROMPT_VERSION = "agenda-v1"
-DEFAULT_MODEL = "anthropic.claude-opus-5-5"
-DEFAULT_FALLBACK_MODEL = "anthropic.claude-opus-4-8"
-DEFAULT_EFFORT = "low"  # extraction; raise it if quality needs it
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_EFFORT = "low"  # thinking level for extraction; raise it if quality needs it
 MAX_INPUT_CHARS = 10_000
 MAX_TOKENS = 16_000
 TOOL_NAME = "record_agenda"
 
-# Anthropic list prices, USD per million tokens (input, output). Bedrock is
-# partner-priced and may differ - the logged cost is an estimate, not a bill.
+# Gemini API paid-tier prices, USD per million tokens (input, output), from
+# ai.google.dev/gemini-api/docs/pricing on 2026-10-29. The 3.8 and 3.6 Flash
+# prices double on 2027-01-01. Thinking tokens bill as output. The free tier
+# costs nothing - the logged cost is an estimate, not a bill.
 PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
-    "anthropic.claude-opus-5-5": (4.00, 20.00),
-    "anthropic.claude-opus-4-8": (5.00, 25.00),
-    "anthropic.claude-sonnet-5-5": (2.00, 10.00),
-    "anthropic.claude-haiku-5-5": (0.10, 0.50),
-    "anthropic.claude-haiku-4-5": (1.00, 5.00),
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
 }
 
 
@@ -101,8 +99,8 @@ def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-# Every property is required, so the model states null explicitly instead of
-# silently leaving something out.
+# A Gemini function declaration. Every property is required, so the model
+# states null explicitly instead of silently leaving something out.
 RECORD_AGENDA_TOOL: dict[str, Any] = {
     "name": TOOL_NAME,
     "description": (
@@ -110,7 +108,7 @@ RECORD_AGENDA_TOOL: dict[str, Any] = {
         "list) for anything the text does not state. Never infer people, times or "
         "items that are not written in the text."
     ),
-    "input_schema": {
+    "parameters_json_schema": {
         "type": "object",
         "additionalProperties": False,
         "required": [
@@ -210,25 +208,21 @@ class AgendaInvalid(AgendaParseError):
 @dataclass
 class Usage:
     input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
+    output_tokens: int = 0  # the answer plus thinking - both bill as output
 
     def add(self, usage: Any) -> None:
-        # A fallback hop reports each attempt in usage.iterations; top-level
-        # usage covers only the attempt that produced the message.
-        hops = getattr(usage, "iterations", None) or [usage]
-        for hop in hops:
-            self.input_tokens += getattr(hop, "input_tokens", 0) or 0
-            self.output_tokens += getattr(hop, "output_tokens", 0) or 0
-            self.cache_read_input_tokens += getattr(hop, "cache_read_input_tokens", 0) or 0
-            self.cache_creation_input_tokens += getattr(hop, "cache_creation_input_tokens", 0) or 0
+        if usage is None:
+            return
+        self.input_tokens += getattr(usage, "prompt_token_count", 0) or 0
+        self.output_tokens += (getattr(usage, "candidates_token_count", 0) or 0) + (
+            getattr(usage, "thoughts_token_count", 0) or 0
+        )
 
 
 @dataclass
 class AgendaParseResult:
     agenda: ParsedAgenda
-    model: str  # the model that actually answered (a refusal fallback may differ)
+    model: str  # the model version that actually answered
     requested_model: str
     prompt_version: str
     attempts: int
@@ -237,7 +231,9 @@ class AgendaParseResult:
 
     @property
     def estimated_cost_usd(self) -> float | None:
-        return estimate_cost_usd(self.model, self.usage)
+        # The reported version may carry a suffix the price table does not list.
+        cost = estimate_cost_usd(self.model, self.usage)
+        return cost if cost is not None else estimate_cost_usd(self.requested_model, self.usage)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -259,7 +255,8 @@ def estimate_cost_usd(model: str, usage: Usage) -> float | None:
     price = PRICES_PER_MTOK.get(model)
     if price is None:
         return None
-    return round((usage.input_tokens * price[0] + usage.output_tokens * price[1]) / 1_000_000, 6)
+    # 8 decimals: a short parse on a Flash model costs well under a tenth of a cent.
+    return round((usage.input_tokens * price[0] + usage.output_tokens * price[1]) / 1_000_000, 8)
 
 
 _TAG = re.compile(r"<\s*/?\s*pasted_text\s*>", re.IGNORECASE)
@@ -276,17 +273,39 @@ def build_user_message(text: str, today: date, tz: str) -> str:
     )
 
 
-def default_client(fallback_model: str | None = None) -> Any:
-    """Claude in Amazon Bedrock (Messages API on bedrock-mantle), with refusal fallback."""
-    from anthropic import AnthropicBedrockMantle, BetaRefusalFallbackMiddleware
+def default_client() -> Any:
+    """A Gemini API client with the backend's key and one transport retry."""
+    from google import genai
+    from google.genai import types
 
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-    fallback = fallback_model or os.environ.get("PARSER_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
-    return AnthropicBedrockMantle(
-        aws_region=region,
-        timeout=45.0,
-        max_retries=1,
-        middleware=[BetaRefusalFallbackMiddleware([{"model": fallback}])],
+    from app.ai.api_key import gemini_api_key
+
+    return genai.Client(
+        api_key=gemini_api_key(),
+        http_options=types.HttpOptions(
+            timeout=45_000,  # milliseconds
+            # Two attempts in all, on 408/429/5xx and connection errors.
+            retry_options=types.HttpRetryOptions(attempts=2, max_delay=4.0),
+        ),
+    )
+
+
+def request_config(effort: str) -> Any:
+    """The fixed part of every request: prompt, forced function call, thinking level."""
+    from google.genai import types
+
+    return types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=[types.Tool(function_declarations=[types.FunctionDeclaration(**RECORD_AGENDA_TOOL)])],
+        tool_config=types.ToolConfig(
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingConfigMode.ANY, allowed_function_names=[TOOL_NAME]
+            )
+        ),
+        # Only a declaration is passed, so nothing could run automatically; say so anyway.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=types.ThinkingConfig(thinking_level=effort.upper()),
+        max_output_tokens=MAX_TOKENS,
     )
 
 
@@ -320,11 +339,32 @@ def _ground(agenda: ParsedAgenda, text: str) -> tuple[ParsedAgenda, list[str]]:
     return grounded, dropped
 
 
-def _tool_call(content: list[Any]) -> Any | None:
-    return next(
-        (b for b in content if getattr(b, "type", None) == "tool_use" and b.name == TOOL_NAME),
-        None,
-    )
+# Finish or block reasons that mean "the model declined", not "try again".
+_REFUSED = {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "RECITATION"}
+
+
+def _reason(value: Any) -> str:
+    return str(getattr(value, "value", value) or "")
+
+
+def _refused(response: Any) -> bool:
+    feedback = getattr(response, "prompt_feedback", None)
+    if feedback is not None and _reason(feedback.block_reason) not in (
+        "",
+        "BLOCKED_REASON_UNSPECIFIED",
+    ):
+        return True
+    candidates = getattr(response, "candidates", None) or []
+    return bool(candidates) and _reason(candidates[0].finish_reason) in _REFUSED
+
+
+def _model_turn(response: Any) -> Any | None:
+    candidates = getattr(response, "candidates", None) or []
+    return candidates[0].content if candidates and candidates[0].content else None
+
+
+def _tool_call(response: Any) -> Any | None:
+    return next((c for c in response.function_calls or [] if c.name == TOOL_NAME), None)
 
 
 def _errors(error: ValidationError) -> str:
@@ -348,78 +388,77 @@ def parse_agenda(
     if len(text) > MAX_INPUT_CHARS:
         raise AgendaTextTooLong(f"the pasted text is longer than {MAX_INPUT_CHARS} characters")
 
-    from anthropic import BetaFallbackState
+    from google.genai import types
 
-    model = model or os.environ.get("PARSER_MODEL", DEFAULT_MODEL)
-    effort = effort or os.environ.get("PARSER_EFFORT", DEFAULT_EFFORT)
+    # An empty variable (PARSER_MODEL= in .env) means "use the default".
+    model = model or os.environ.get("PARSER_MODEL") or DEFAULT_MODEL
+    effort = effort or os.environ.get("PARSER_EFFORT") or DEFAULT_EFFORT
     client = client or default_client()
+    config = request_config(effort)
     usage = Usage()
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": build_user_message(text, today, tz)}
+    contents: list[Any] = [
+        types.Content(role="user", parts=[types.Part(text=build_user_message(text, today, tz))])
     ]
 
-    # One fallback state per conversation: both attempts stay on the model that
-    # accepted the first one.
-    with BetaFallbackState():
-        for attempt in (1, 2):
-            response = client.beta.messages.create(
-                model=model,
-                max_tokens=MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                tools=[RECORD_AGENDA_TOOL],
-                tool_choice={"type": "auto"},
-                output_config={"effort": effort},
-                messages=messages,
-            )
-            usage.add(response.usage)
-            if response.stop_reason == "refusal":
-                raise AgendaRefused("the model declined to read this text")
+    for attempt in (1, 2):
+        response = client.models.generate_content(model=model, contents=contents, config=config)
+        usage.add(response.usage_metadata)
+        if _refused(response):
+            raise AgendaRefused("the model declined to read this text")
 
-            call = _tool_call(response.content)
-            if call is None:
-                problem = f"No {TOOL_NAME} call was made."
-                follow_up: dict[str, Any] = {
-                    "role": "user",
-                    "content": (
-                        f"{problem} Call {TOOL_NAME} now, with null for anything not stated."
-                    ),
-                }
-            else:
-                try:
-                    parsed = ParsedAgenda.model_validate(call.input)
-                except ValidationError as error:
-                    problem = _errors(error)
-                    follow_up = {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": call.id,
-                                "is_error": True,
-                                "content": (
-                                    f"The values did not validate: {problem}. Call {TOOL_NAME} "
-                                    "again with corrected values; use null for anything the "
-                                    "text does not state."
-                                ),
-                            }
-                        ],
-                    }
-                else:
-                    grounded, dropped = _ground(parsed, text)
-                    return AgendaParseResult(
-                        agenda=grounded,
-                        model=getattr(response, "model", None) or model,
-                        requested_model=model,
-                        prompt_version=PROMPT_VERSION,
-                        attempts=attempt,
-                        usage=usage,
-                        ungrounded=dropped,
+        call = _tool_call(response)
+        if call is None:
+            problem = f"No {TOOL_NAME} call was made."
+            follow_up = types.Content(
+                role="user",
+                parts=[
+                    types.Part(
+                        text=f"{problem} Call {TOOL_NAME} now, with null for anything not stated."
                     )
+                ],
+            )
+        else:
+            try:
+                parsed = ParsedAgenda.model_validate(call.args or {})
+            except ValidationError as error:
+                problem = _errors(error)
+                follow_up = types.Content(
+                    role="tool",
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=call.id,
+                                name=TOOL_NAME,
+                                response={
+                                    "error": (
+                                        f"The values did not validate: {problem}. Call "
+                                        f"{TOOL_NAME} again with corrected values; use null "
+                                        "for anything the text does not state."
+                                    )
+                                },
+                            )
+                        )
+                    ],
+                )
+            else:
+                grounded, dropped = _ground(parsed, text)
+                return AgendaParseResult(
+                    agenda=grounded,
+                    model=getattr(response, "model_version", None) or model,
+                    requested_model=model,
+                    prompt_version=PROMPT_VERSION,
+                    attempts=attempt,
+                    usage=usage,
+                    ungrounded=dropped,
+                )
 
-            if attempt == 2:
-                raise AgendaInvalid(f"no valid {TOOL_NAME} call after a retry: {problem}")
-            # Append-only: the model's turn exactly as returned, then the correction.
-            messages.append({"role": "assistant", "content": response.content})
-            messages.append(follow_up)
+        if attempt == 2:
+            raise AgendaInvalid(f"no valid {TOOL_NAME} call after a retry: {problem}")
+        # Append-only: the model's turn exactly as returned (it carries the
+        # thought signatures Gemini needs back), then the correction.
+        turn = _model_turn(response)
+        if turn is not None:
+            contents.append(turn)
+        contents.append(follow_up)
 
     raise AssertionError("unreachable")

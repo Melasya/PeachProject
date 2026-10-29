@@ -9,10 +9,11 @@ import time
 from datetime import date
 from typing import Any
 
-import anthropic
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from google.genai import errors
 
 from app import auth
 from app.ai import lambda_handler as parser
@@ -23,10 +24,12 @@ from app.ai.agenda import (
     ParsedAgenda,
     Usage,
 )
+from app.ai.api_key import ApiKeyNotConfigured, ApiKeyUnavailable
 
 ISSUER = "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_TEST"
 CLIENT_ID = "webclient123"
 SECRET_TEXT = "Board meeting about the acquisition of Contoso at 10:00"
+FAKE_KEY = "AIza-test-value-that-must-never-leak"
 
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -73,8 +76,8 @@ def event(
 def result(**overrides: Any) -> AgendaParseResult:
     return AgendaParseResult(
         agenda=ParsedAgenda(title="Board meeting", participants=[]),
-        model="anthropic.claude-opus-5-5",
-        requested_model="anthropic.claude-opus-5-5",
+        model="gemini-3.5-flash-lite",
+        requested_model="gemini-3.5-flash-lite",
         prompt_version="agenda-v1",
         attempts=1,
         usage=Usage(input_tokens=1200, output_tokens=300),
@@ -87,7 +90,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     """Configure auth with a local JWKS and stand in for the model."""
     monkeypatch.setenv("COGNITO_ISSUER", ISSUER)
     monkeypatch.setenv("COGNITO_CLIENT_ID", CLIENT_ID)
-    monkeypatch.setenv("PARSER_MODEL", "anthropic.claude-opus-5-5")
+    monkeypatch.setenv("PARSER_MODEL", "gemini-3.5-flash-lite")
     fetches: list[str] = []
 
     def fetch(issuer: str) -> dict[str, Any]:
@@ -121,10 +124,10 @@ def test_signed_in_request_is_parsed(calls: list, caplog: pytest.LogCaptureFixtu
     assert response["statusCode"] == 200
     out = body(response)
     assert out["agenda"]["title"] == "Board meeting"
-    assert out["model"] == "anthropic.claude-opus-5-5"
+    assert out["model"] == "gemini-3.5-flash-lite"
     assert out["prompt_version"] == "agenda-v1"
     assert out["usage"] == {"input_tokens": 1200, "output_tokens": 300}
-    assert out["estimated_cost_usd"] == pytest.approx(1200 * 4e-6 + 300 * 20e-6)
+    assert out["estimated_cost_usd"] == pytest.approx(1200 * 0.30e-6 + 300 * 2.50e-6)
     assert calls == [
         {"text": SECRET_TEXT, "today": date(2026, 10, 19), "tz": "Europe/Kyiv", "fetches": 1}
     ]
@@ -141,11 +144,11 @@ def test_log_line_has_the_metrics_but_never_the_text(
     assert len(lines) == 1
     line = lines[0]
     assert line["outcome"] == "ok" and line["status"] == 200
-    assert line["model"] == "anthropic.claude-opus-5-5"
+    assert line["model"] == "gemini-3.5-flash-lite"
     assert line["prompt_version"] == "agenda-v1"
     assert (line["input_tokens"], line["output_tokens"]) == (1200, 300)
     assert isinstance(line["latency_ms"], int)
-    assert line["estimated_cost_usd"] == pytest.approx(0.0108)
+    assert line["estimated_cost_usd"] == pytest.approx(0.00111)
     assert SECRET_TEXT not in caplog.text and "Contoso" not in caplog.text
 
 
@@ -256,27 +259,40 @@ def test_auth_is_checked_before_the_body(calls: list) -> None:
 # --- model failures map to clear HTTP errors -------------------------------------------------
 
 
-def _sdk_error(cls: type[Exception]) -> Exception:
-    # The SDK's errors need real HTTP objects to construct; only the type matters here.
-    return cls.__new__(cls)
+def _gemini_error(code: int, status: str, message: str = "upstream says no") -> Exception:
+    error = {"error": {"code": code, "status": status, "message": message}}
+    return (errors.ClientError if code < 500 else errors.ServerError)(code, error)
 
 
 @pytest.mark.parametrize(
-    ("raised", "status"),
+    ("raised", "status", "outcome"),
     [
-        (AgendaInvalid("still invalid"), 502),
-        (AgendaRefused("declined"), 422),
-        (_sdk_error(anthropic.RateLimitError), 429),
-        (_sdk_error(anthropic.APITimeoutError), 504),
-        (_sdk_error(anthropic.PermissionDeniedError), 503),
-        (_sdk_error(anthropic.NotFoundError), 503),
-        (_sdk_error(anthropic.InternalServerError), 502),
-        (_sdk_error(anthropic.APIConnectionError), 502),
+        (AgendaInvalid("still invalid"), 502, "invalid_after_retry"),
+        (AgendaRefused("declined"), 422, "refused"),
+        (ApiKeyNotConfigured("no key"), 503, "api_key_not_configured"),
+        (ApiKeyUnavailable("could not read SSM parameter /x"), 503, "api_key_unavailable"),
+        (_gemini_error(429, "RESOURCE_EXHAUSTED"), 429, "throttled"),
+        (_gemini_error(400, "INVALID_ARGUMENT", "API key not valid."), 503, "model_unavailable"),
+        (_gemini_error(403, "PERMISSION_DENIED"), 503, "model_unavailable"),
+        (_gemini_error(404, "NOT_FOUND", "model not found"), 503, "model_unavailable"),
+        (_gemini_error(400, "INVALID_ARGUMENT", "bad schema"), 502, "upstream_error"),
+        (_gemini_error(500, "INTERNAL"), 502, "upstream_error"),
+        (_gemini_error(503, "UNAVAILABLE"), 502, "upstream_error"),
+        (_gemini_error(504, "DEADLINE_EXCEEDED"), 504, "timeout"),
+        (httpx.ReadTimeout("timed out"), 504, "timeout"),
+        (httpx.ConnectError("unreachable"), 502, "upstream_error"),
     ],
 )
 def test_model_errors(
-    calls: list, monkeypatch: pytest.MonkeyPatch, raised: Exception, status: int
+    calls: list,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    raised: Exception,
+    status: int,
+    outcome: str,
 ) -> None:
+    caplog.set_level(logging.INFO)
+
     def failing(*args: Any) -> None:
         raise raised
 
@@ -284,6 +300,27 @@ def test_model_errors(
     response = parser.handler(event({"text": "agenda"}), None)
     assert response["statusCode"] == status
     assert "detail" in body(response)
+    line = json.loads(
+        next(r.getMessage() for r in caplog.records if "agenda-parser" in r.getMessage())
+    )
+    assert line["outcome"] == outcome
+
+
+def test_the_api_key_never_reaches_the_response_or_the_log(
+    calls: list, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("GEMINI_API_KEY", FAKE_KEY)
+
+    def failing(*args: Any) -> None:  # an upstream message that echoes the key back
+        raise _gemini_error(400, "INVALID_ARGUMENT", f"API key not valid: {FAKE_KEY}")
+
+    monkeypatch.setattr(parser, "parse_agenda", failing)
+    response = parser.handler(event({"text": SECRET_TEXT}), None)
+    assert response["statusCode"] == 503
+    assert FAKE_KEY not in json.dumps(response)
+    assert FAKE_KEY not in caplog.text
+    assert SECRET_TEXT not in caplog.text
 
 
 # --- it never touches the database -------------------------------------------------------------

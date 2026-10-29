@@ -9,14 +9,15 @@ C4Container
   Person(user, "Team member", "Plans meetings in a browser")
 
   System_Ext(google, "Google", "Federated sign-in")
-  System_Ext(bedrock, "Amazon Bedrock", "Claude Opus 5.5; refusal fallback Opus 4.8")
+  System_Ext(gemini, "Gemini API", "Google; gemini-3.5-flash-lite, function calling")
   System_Ext(ses, "Amazon SES", "Sends the weekly report")
 
   Container_Boundary(aws, "AWS account (us-east-1)") {
     Container(spa, "Web app", "Next.js static export on S3 + CloudFront", "Board, meetings, Paste an agenda")
     Container(cognito, "User pool", "Amazon Cognito (peach-auth)", "Email/password and Google; issues access tokens")
     Container(api, "API", "FastAPI on Lambda + Function URL, in VPC (peach-backend)", "Items and meetings; validates every write")
-    Container(parser, "Agenda parser", "Python Lambda + Function URL, outside VPC (peach-ai)", "Verifies the token, calls Claude, validates and grounds; never writes")
+    Container(parser, "Agenda parser", "Python Lambda + Function URL, outside VPC (peach-ai)", "Verifies the token, calls Gemini, validates and grounds; never writes")
+    Container(ssm, "Key store", "SSM Parameter Store SecureString", "/peach/gemini-api-key; read by the parser only")
     ContainerDb(db, "Database", "RDS PostgreSQL db.t4g.micro", "items, meetings, participants, agenda and action items, AI provenance")
     Container(scheduler, "Weekly schedule", "EventBridge Scheduler (peach-reports)", "Monday 07:00 Europe/Kyiv")
     ContainerQueue(queue, "Report requests", "SQS + DLQ", "At-least-once, 3 receives")
@@ -30,7 +31,8 @@ C4Container
   Rel(cognito, google, "Federates", "OIDC")
   Rel(spa, parser, "POST pasted text + access token", "HTTPS/JSON")
   Rel(parser, cognito, "Fetches JWKS", "HTTPS")
-  Rel(parser, bedrock, "Messages API, record_agenda tool", "HTTPS, IAM role")
+  Rel(parser, ssm, "Reads the API key once per container", "HTTPS, IAM role")
+  Rel(parser, gemini, "generateContent, forced record_agenda call", "HTTPS, API key header")
   Rel(spa, api, "Reads and saves the reviewed meeting, with the access token", "HTTPS/JSON")
   Rel(api, db, "Reads/writes", "SQL")
   Rel(scheduler, queue, "Sends request")
@@ -45,8 +47,12 @@ C4Container
 ```
 
 **What changed in Lab 6:**
-- New container: the **Agenda parser**, outside the VPC. Its only outbound calls are to
-  Bedrock and the Cognito JWKS.
+- New container: the **Agenda parser**, outside the VPC. Its only outbound calls are to the
+  Gemini API, SSM (for its API key) and the Cognito JWKS.
+- The model is **Google's Gemini API**, an external system. It replaced Claude on Amazon
+  Bedrock, whose inference quotas were 0 on this account
+  ([ADR 0007](../adr/0007-gemini-instead-of-bedrock.md)). The API key lives in the **Key
+  store**; the browser never sees it.
 - New relationship: the web app calls the parser **only** for suggestions, then saves through
   the **API** as before.
 - The API now checks the same Cognito access token on every meetings endpoint. It has no

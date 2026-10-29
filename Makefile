@@ -97,16 +97,19 @@ reports-logs: ## Trigger lines (schedule / sqs / s3) from the builder and mailer
 reports-queues: ## Messages waiting / in flight on the report queue and its DLQ
 	./scripts/reports.sh queues
 
-deploy-ai: ## Create/update the agenda-parser stack (Lambda outside the VPC -> Claude on Bedrock); writes PARSER_URL to .env
+deploy-ai: ## Create/update the agenda-parser stack (Lambda outside the VPC -> Gemini API); writes PARSER_URL to .env
 	./scripts/deploy-ai.sh
 
-# Both call Amazon Bedrock with your local AWS credentials (read-only mount) and cost a
-# fraction of a cent; DRY_RUN=1 prints the request instead and calls nothing.
-parse: ## Parse an agenda file locally: make parse FILE=app/ai/examples/sample-agenda.txt [DRY_RUN=1]
-	$(COMPOSE) run --rm --no-deps -v "$(HOME)/.aws:/root/.aws:ro" -e AWS_PROFILE -e AWS_REGION=$${AWS_REGION:-us-east-1} backend python -m app.ai.cli parse --file "$(or $(FILE),app/ai/examples/sample-agenda.txt)" $(if $(DRY_RUN),--dry-run)
+# Both call the Gemini API with GEMINI_API_KEY from .env (free on the free tier); DRY_RUN=1
+# prints the request instead and calls nothing. .env is sourced in this shell and only that
+# one variable is handed to the container, by name - its value is never on a command line.
+LOAD_KEY := set -a; [ -f .env ] && . ./.env; set +a;
 
-llm-hello: ## One tiny Bedrock call to check model access (costs a fraction of a cent)
-	$(COMPOSE) run --rm --no-deps -v "$(HOME)/.aws:/root/.aws:ro" -e AWS_PROFILE -e AWS_REGION=$${AWS_REGION:-us-east-1} backend python -m app.ai.cli hello
+parse: ## Parse an agenda file locally: make parse FILE=app/ai/examples/sample-agenda.txt [DRY_RUN=1]
+	@$(LOAD_KEY) $(COMPOSE) run --rm --no-deps -e GEMINI_API_KEY -e PARSER_MODEL -e PARSER_EFFORT backend python -m app.ai.cli parse --file "$(or $(FILE),app/ai/examples/sample-agenda.txt)" $(if $(DRY_RUN),--dry-run)
+
+llm-hello: ## One tiny Gemini call to check the key and model
+	@$(LOAD_KEY) $(COMPOSE) run --rm --no-deps -e GEMINI_API_KEY -e PARSER_MODEL backend python -m app.ai.cli hello
 
 github-role: ## Create the IAM role GitHub Actions assumes to deploy (OIDC, no keys)
 	./scripts/github-role.sh
