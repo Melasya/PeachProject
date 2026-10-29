@@ -1,6 +1,6 @@
 # ADR 0007: Call the Gemini API instead of Claude on Amazon Bedrock
 
-- Status: Accepted (implemented and tested locally with a fake client; not yet deployed)
+- Status: Accepted; deployed 2026-10-29 (stack `peach-ai`) and confirmed with live parses
 - Date: 2026-10-29
 - Context: Lab 6. Supersedes decision 1 of [ADR 0006](0006-llm-agenda-parsing.md).
 
@@ -14,7 +14,9 @@ account cannot run Bedrock inference:
 - Service Quotas shows every Bedrock inference quota at **0** in us-east-1 and us-west-2,
   even after the account became active. The models are ACTIVE; the quotas block them.
 
-The instructor allowed Google's Gemini API instead. Everything else in ADR 0006 has to stay:
+The lab requires Claude on Amazon Bedrock, so this is a deviation from the assignment, disclosed
+in the Lab 6 submission; whether it is accepted is the instructor's decision. To have a parser
+that runs at all, it calls Google's Gemini API instead. Everything else in ADR 0006 has to stay:
 Parse → Edit → Save, the forced structured answer, Pydantic validation with one retry,
 grounding, Cognito auth, safe logging, and a parser Lambda that cannot reach the database.
 
@@ -75,8 +77,8 @@ grounding, Cognito auth, safe logging, and a parser Lambda that cannot reach the
   only test agendas (fictional names, `@example.com`); real personal data needs the paid tier.
   The privacy page should say that pasted text goes to Google.
 - **Data leaves AWS.** Pasted text now goes to Google instead of staying with an AWS service.
-- **Not yet confirmed live:** that Gemini accepts the schema's `anyOf: [..., null]` exactly as
-  written, and how well it extracts. The first real call (`make llm-hello`, then the five lab
-  cases) checks both.
+- **Confirmed live (2026-10-29):** Gemini accepts the schema's `anyOf: [..., null]` as written;
+  two parses on the deployed site validated on the first attempt. Extraction quality across
+  the five lab cases is measured separately.
 - **Switching back:** if Bedrock quotas are restored, going back means reverting this change;
   the Bedrock version is in git history (commit b59b76f). There is no runtime provider switch.

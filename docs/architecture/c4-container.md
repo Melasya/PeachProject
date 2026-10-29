@@ -1,6 +1,10 @@
 # C4 level 2: containers
 
-Peach after Lab 6. The grey container (`peach-ai`) is not deployed yet.
+Peach after Lab 6, as deployed. The two Lab 6 paths: **Browser → Agenda parser → Gemini API**
+for suggestions, and **Browser → API → Database** for the reviewed save. The lab asked for
+Claude on Amazon Bedrock; this account's Bedrock inference quotas are 0, so the parser calls
+Gemini instead ([ADR 0007](../adr/0007-gemini-instead-of-bedrock.md)). The database is RDS
+PostgreSQL, not Aurora (AWS Free Plan).
 
 ```mermaid
 C4Container
@@ -42,7 +46,6 @@ C4Container
   Rel(reports, mailer, "ObjectCreated")
   Rel(mailer, ses, "Sends email")
 
-  UpdateElementStyle(parser, $borderColor="#888888", $fontColor="#000000", $bgColor="#eeeeee")
   UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="1")
 ```
 
