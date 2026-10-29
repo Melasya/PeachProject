@@ -77,7 +77,8 @@ log "stack ${STACK_NAME} in ${AWS_REGION}: image ${IMAGE_URI##*/}, model ${PARSE
 log "CORS origins ${SITE_URL}, ${LOCAL_URL}"
 log "API key from SSM ${KEY_PARAMETER} (read by the function at run time)"
 
-if ! aws cloudformation deploy \
+# MSYS_NO_PATHCONV: Git Bash would otherwise rewrite /peach/... into a Windows path.
+if ! MSYS_NO_PATHCONV=1 aws cloudformation deploy \
   --stack-name "${STACK_NAME}" \
   --template-file infra/ai.yml \
   --parameter-overrides \
