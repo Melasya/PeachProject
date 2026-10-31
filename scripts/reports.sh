@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Operate and inspect the weekly-report stack (infra/reports.yml).
+# Operate and inspect the weekly report (infra/reports.tf, managed by Terraform).
 #
 #   reports.sh now [WEEK]          queue a report request on SQS - the normal path.
 #                                  No WEEK: the builder picks the last complete week.
@@ -44,18 +44,30 @@ for var in AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 done
 
 PROJECT_NAME="${PROJECT_NAME:-peach}"
-STACK_NAME="${REPORTS_STACK_NAME:-${PROJECT_NAME}-reports}"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 export AWS_DEFAULT_REGION="${AWS_REGION}"
 
 command -v aws >/dev/null 2>&1 || die "aws cli is required"
+command -v terraform >/dev/null 2>&1 || die "terraform is required (the report's resources are its outputs)"
 
+# The names below are the old stack outputs; Terraform's outputs (infra/outputs.tf)
+# carry the same values under these names.
 output() {
-  local value
-  value="$(aws cloudformation describe-stacks --stack-name "${STACK_NAME}" \
-    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null)" \
-    || die "stack ${STACK_NAME} not found - run make deploy-reports first"
-  [[ -n "${value}" && "${value}" != "None" ]] || die "no $1 output on ${STACK_NAME}"
+  local name value
+  case "$1" in
+    BucketName) name=reports_bucket ;;
+    QueueUrl) name=reports_queue_url ;;
+    QueueArn) name=reports_queue_arn ;;
+    DeadLetterQueueUrl) name=reports_dlq_url ;;
+    BuilderFunctionName) name=reports_builder_function ;;
+    BuilderLogGroupName) name=reports_builder_log_group ;;
+    MailerLogGroupName) name=reports_mailer_log_group ;;
+    SchedulerRoleArn) name=reports_scheduler_role_arn ;;
+    *) die "unknown output $1" ;;
+  esac
+  value="$(terraform -chdir=infra output -raw "${name}" 2>/dev/null)" \
+    || die "no ${name} output - run terraform init in infra/ (HCP Terraform login) first"
+  [[ -n "${value}" ]] || die "no ${name} output"
   printf '%s' "${value}"
 }
 

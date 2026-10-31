@@ -18,12 +18,12 @@ C4Container
 
   Container_Boundary(aws, "AWS account (us-east-1)") {
     Container(spa, "Web app", "Next.js static export on S3 + CloudFront", "Board, meetings, Paste an agenda")
-    Container(cognito, "User pool", "Amazon Cognito (peach-auth)", "Email/password and Google; issues access tokens")
+    Container(cognito, "User pool", "Amazon Cognito (infra/auth.tf)", "Email/password and Google; issues access tokens")
     Container(api, "API", "FastAPI on Lambda + Function URL, in VPC (peach-backend)", "Items and meetings; validates every write")
-    Container(parser, "Agenda parser", "Python Lambda + Function URL, outside VPC (peach-ai)", "Verifies the token, calls Gemini, validates and grounds; never writes")
+    Container(parser, "Agenda parser", "Python Lambda + Function URL, outside VPC (infra/ai.tf)", "Verifies the token, calls Gemini, validates and grounds; never writes")
     Container(ssm, "Key store", "SSM Parameter Store SecureString", "/peach/gemini-api-key; read by the parser only")
     ContainerDb(db, "Database", "RDS PostgreSQL db.t4g.micro", "items, meetings, participants, agenda and action items, AI provenance")
-    Container(scheduler, "Weekly schedule", "EventBridge Scheduler (peach-reports)", "Monday 07:00 Europe/Kyiv")
+    Container(scheduler, "Weekly schedule", "EventBridge Scheduler (infra/reports.tf)", "Monday 07:00 Europe/Kyiv")
     ContainerQueue(queue, "Report requests", "SQS + DLQ", "At-least-once, 3 receives")
     Container(builder, "Report builder", "Lambda in VPC", "Builds the weekly CSV")
     ContainerDb(reports, "Reports bucket", "S3", "reports/<ISO-week>.csv")

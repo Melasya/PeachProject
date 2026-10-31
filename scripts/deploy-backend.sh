@@ -198,15 +198,19 @@ fi
 # with no internet access, so it cannot fetch the user pool's signing keys
 # itself: fetch them here and pin them in the function's environment. They are
 # public keys. If Cognito ever rotates them, redeploy the backend.
-AUTH_STACK="${AUTH_STACK_NAME:-${PROJECT_NAME}-auth}"
-auth_output() {
-  aws cloudformation describe-stacks --stack-name "${AUTH_STACK}" \
-    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true
+#
+# Terraform owns the user pool (infra/, ADR 0008): the issuer and client come
+# from its outputs, unless already exported - CI sets them from the
+# repository's variables, since it has no access to the Terraform state.
+infra_output() {
+  command -v terraform >/dev/null 2>&1 || return 0
+  local dir="${ROOT}/infra"
+  # Git Bash: terraform.exe cannot open /c/... paths.
+  command -v cygpath >/dev/null 2>&1 && dir="$(cygpath -m "${dir}")"
+  terraform -chdir="${dir}" output -raw "$1" 2>/dev/null || true
 }
-COGNITO_ISSUER="$(auth_output Authority)"
-COGNITO_CLIENT_ID="$(auth_output ClientId)"
-[[ "${COGNITO_ISSUER}" == "None" ]] && COGNITO_ISSUER=""
-[[ "${COGNITO_CLIENT_ID}" == "None" ]] && COGNITO_CLIENT_ID=""
+COGNITO_ISSUER="${COGNITO_AUTHORITY:-$(infra_output cognito_authority)}"
+COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(infra_output cognito_client_id)}"
 COGNITO_JWKS=""
 
 if [[ -n "${COGNITO_ISSUER}" && -n "${COGNITO_CLIENT_ID}" ]]; then
@@ -222,9 +226,9 @@ if not keys:
     sys.exit("no RSA keys in " + url)
 print(json.dumps({"keys": keys}, separators=(",", ":")))')" \
     || die "could not fetch the user pool's signing keys from ${COGNITO_ISSUER}"
-  log "sign-in: ${AUTH_STACK}, $(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["keys"]))' "${COGNITO_JWKS}") signing key(s) pinned"
+  log "sign-in: ${COGNITO_ISSUER}, $(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])["keys"]))' "${COGNITO_JWKS}") signing key(s) pinned"
 else
-  warn "no sign-in settings from stack ${AUTH_STACK}: /api/v1/meetings will answer 503 until it exists"
+  warn "no sign-in settings (COGNITO_AUTHORITY / COGNITO_CLIENT_ID): /api/v1/meetings will answer 503 until they are set"
 fi
 
 # --- deploy -----------------------------------------------------------------

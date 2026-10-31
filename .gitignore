@@ -32,9 +32,22 @@ pgdata/
 # --- deploy ---
 # written by scripts/deploy-backend.sh; holds the database password
 infra-params.json
-# written by scripts/deploy-auth.sh; holds the Google client secret
-auth-params.json
-# written by scripts/deploy-reports.sh; holds the database URL
-reports-params.json
 # reports downloaded by scripts/reports.sh get
 .reports/
+
+# --- terraform ---
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+generated.tf
+# local overrides and secret variable files never go to Git
+override.tf
+*_override.tf
+*.auto.tfvars
+secret.tfvars
+
+# --- course material ---
+lab7_instructions.pdf

@@ -36,8 +36,8 @@ KEY_PREFIX = "reports/"
 
 # Test-only switch for the DLQ redrive demonstration: when exactly "true", every
 # valid request fails after validation and before any database or S3 access, so
-# messages go to the DLQ untouched. Set only by `deploy-reports.sh
-# --simulate-failure`; every other deploy sets it back to "false".
+# messages go to the DLQ untouched. Set only by the Terraform variable
+# `simulate_builder_failure = true` (infra/reports.tf); absent otherwise.
 SIMULATE_FAILURE_ENV = "REPORTS_SIMULATE_FAILURE"
 
 _s3: Any = None

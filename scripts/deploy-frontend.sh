@@ -71,31 +71,28 @@ log "building against ${API_URL}"
 
 # --- which Cognito user pool does it sign in with? --------------------------
 
-# Public values only, read from the auth stack's outputs rather than copied by
-# hand: the client has no secret, and the Google secret never leaves Cognito.
-# CI reads them the same way. A site without them would have no sign-in, so
-# stop instead of shipping one.
-AUTH_STACK="${AUTH_STACK_NAME:-${PROJECT_NAME}-auth}"
-auth_output() {
-  aws cloudformation describe-stacks --stack-name "${AUTH_STACK}" \
-    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true
+# Public values only: the client has no secret, and the Google secret never
+# leaves Cognito. Terraform owns sign-in and the parser (infra/, ADR 0008), so
+# they come from its outputs - unless already exported, as CI does from the
+# repository's variables (it has no access to the Terraform state). A site
+# without them would have no sign-in, so stop instead of shipping one.
+infra_output() {
+  command -v terraform >/dev/null 2>&1 || return 0
+  terraform -chdir="${ROOT}/infra" output -raw "$1" 2>/dev/null || true
 }
-COGNITO_AUTHORITY="$(auth_output Authority)"
-COGNITO_CLIENT_ID="$(auth_output ClientId)"
-COGNITO_DOMAIN="$(auth_output HostedDomainUrl)"
+COGNITO_AUTHORITY="${COGNITO_AUTHORITY:-$(infra_output cognito_authority)}"
+COGNITO_CLIENT_ID="${COGNITO_CLIENT_ID:-$(infra_output cognito_client_id)}"
+COGNITO_DOMAIN="${COGNITO_DOMAIN:-$(infra_output cognito_domain)}"
 for value in "${COGNITO_AUTHORITY}" "${COGNITO_CLIENT_ID}" "${COGNITO_DOMAIN}"; do
-  [[ -n "${value}" && "${value}" != "None" ]] \
-    || die "no sign-in settings from stack ${AUTH_STACK} - run make deploy-auth first"
+  [[ -n "${value}" ]] \
+    || die "no sign-in settings - set COGNITO_AUTHORITY, COGNITO_CLIENT_ID and COGNITO_DOMAIN, or run terraform init in infra/"
 done
 
 log "signing in with ${COGNITO_AUTHORITY}"
 
-# The agenda parser is optional: without its stack the paste panel says AI
-# parsing is not configured, and the rest of the site is unchanged.
-PARSER_URL_VALUE="$(aws cloudformation describe-stacks \
-  --stack-name "${AI_STACK_NAME:-${PROJECT_NAME}-ai}" \
-  --query "Stacks[0].Outputs[?OutputKey=='ParserUrl'].OutputValue" --output text 2>/dev/null || true)"
-[[ "${PARSER_URL_VALUE}" == "None" ]] && PARSER_URL_VALUE=""
+# The agenda parser is optional: without it the paste panel says AI parsing is
+# not configured, and the rest of the site is unchanged.
+PARSER_URL_VALUE="${PARSER_URL:-$(infra_output parser_url)}"
 PARSER_URL_VALUE="${PARSER_URL_VALUE%/}"
 log "agenda parser: ${PARSER_URL_VALUE:-not deployed}"
 

@@ -1,0 +1,26 @@
+# What a CLI-driven HCP Terraform run (make infra-plan) must NOT upload. The run
+# needs only infra/; HCP Terraform uploads the whole repository root because
+# the workspace's working directory is infra. .git/ and .terraform/ are always
+# skipped.
+
+# provider binaries (the built-in rule skips only the root's .terraform/)
+**/.terraform/
+
+# secrets and local state
+.env
+.env.*
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra/bootstrap/
+
+# everything else that is not infrastructure
+node_modules/
+frontend/
+backend/
+docs/
+scripts/
+.reports/
+pgdata/
+.venv/
+*.pdf

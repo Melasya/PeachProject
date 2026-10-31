@@ -36,6 +36,14 @@ jobs:
       # defaults, and any parameter left empty keeps whatever the stack
       # already has - so a deploy from CI will not undo CORS settings.
       PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+      # Sign-in and the agenda parser are Terraform's (infra/, ADR 0008) and
+      # this job cannot read its state, so their public values come from
+      # repository variables, copied from `make infra-output`. None is secret:
+      # all four end up in the browser bundle anyway.
+      COGNITO_AUTHORITY: ${{ vars.COGNITO_AUTHORITY }}
+      COGNITO_CLIENT_ID: ${{ vars.COGNITO_CLIENT_ID }}
+      COGNITO_DOMAIN: ${{ vars.COGNITO_DOMAIN }}
+      PARSER_URL: ${{ vars.PARSER_URL }}
     steps:
       - uses: actions/checkout@v4
 

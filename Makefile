@@ -1,6 +1,6 @@
 COMPOSE := docker compose
 
-.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean seed-meetings shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend deploy-auth deploy-reports deploy-ai parse llm-hello report-now reports-ls reports-logs reports-queues github-role
+.PHONY: help up down build logs ps migrate revision test test-backend test-frontend lint fmt clean seed-meetings shell-backend shell-db deploy-backend destroy-backend logs-backend migrate-backend cert domain deploy-frontend destroy-frontend infra-init infra-plan infra-output deploy-functions parse llm-hello report-now reports-ls reports-logs reports-queues github-role
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -79,11 +79,19 @@ deploy-frontend: ## Build the static export against BACKEND_URL and ship it to S
 destroy-frontend: ## Delete the frontend stack (bucket + distribution)
 	./scripts/destroy-frontend.sh
 
-deploy-auth: ## Create/update the Cognito sign-in stack (user pool, Google, managed login); writes COGNITO_* to .env
-	./scripts/deploy-auth.sh
+# Sign-in, the weekly report and the agenda parser are Terraform (infra/, ADR 0008).
+# There is deliberately no apply target: applies run only in HCP Terraform, after a merge.
+infra-init: ## terraform init in infra/ against the HCP Terraform workspace (needs terraform login once)
+	terraform -chdir=infra init
 
-deploy-reports: ## Create/update the weekly-report stack (scheduler -> SQS -> builder -> S3 -> mailer -> SES)
-	./scripts/deploy-reports.sh
+infra-plan: ## Speculative plan of infra/ - runs in HCP Terraform, changes nothing
+	terraform -chdir=infra plan
+
+infra-output: ## Print infra/'s outputs (user pool, client, parser URL, report queue...)
+	terraform -chdir=infra output
+
+deploy-functions: ## Ship new code to the parser, builder (backend image) and mailer (zip); config stays Terraform's
+	./scripts/deploy-functions.sh
 
 report-now: ## Queue a report request on SQS: make report-now WEEK=2026-W39 (no WEEK: last complete week)
 	./scripts/reports.sh now "$(WEEK)"
@@ -96,9 +104,6 @@ reports-logs: ## Trigger lines (schedule / sqs / s3) from the builder and mailer
 
 reports-queues: ## Messages waiting / in flight on the report queue and its DLQ
 	./scripts/reports.sh queues
-
-deploy-ai: ## Create/update the agenda-parser stack (Lambda outside the VPC -> Gemini API); writes PARSER_URL to .env
-	./scripts/deploy-ai.sh
 
 # Both call the Gemini API with GEMINI_API_KEY from .env (free on the free tier); DRY_RUN=1
 # prints the request instead and calls nothing. .env is sourced in this shell and only that

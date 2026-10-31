@@ -75,9 +75,14 @@ Peach/
 ├── infra/
 │   ├── backend.yaml              # CloudFormation: Lambda + function URL + RDS PostgreSQL
 │   ├── frontend.yaml             # CloudFormation: S3 + CloudFront (+ optional custom domain)
-│   ├── auth.yaml                 # CloudFormation: Cognito user pool, Google, managed login
-│   ├── reports.yml               # CloudFormation: weekly report - scheduler, SQS, builder, S3, mailer
-│   └── github-oidc.yaml          # CloudFormation: the role Actions assumes
+│   ├── github-oidc.yaml          # CloudFormation: the role Actions assumes
+│   ├── versions.tf               # Terraform: HCP Terraform workspace, AWS provider (section 18)
+│   ├── variables.tf              # Terraform inputs; terraform.tfvars holds the non-secret ones
+│   ├── auth.tf                   # Terraform: Cognito user pool, Google, managed login (Lab 4)
+│   ├── reports.tf                # Terraform: weekly report - scheduler, SQS, builder, S3, mailer (Lab 5)
+│   ├── ai.tf                     # Terraform: agenda parser Lambda + function URL (Lab 6)
+│   ├── outputs.tf                # what the Makefile, scripts and frontend build read
+│   └── bootstrap/                # Terraform, local state: OIDC trust + roles for HCP Terraform
 │
 ├── scripts/
 │   ├── deploy-backend.sh         # build -> ECR -> CloudFormation -> migrate -> BACKEND_URL in .env
@@ -85,8 +90,7 @@ Peach/
 │   ├── deploy-frontend.sh        # static export (against BACKEND_URL) -> S3 -> CloudFront
 │   ├── domain-frontend.sh        # us-east-1 ACM certificate + DNS for the frontend's domain
 │   ├── destroy-frontend.sh       # delete the bucket and distribution
-│   ├── deploy-auth.sh            # Cognito stack (Google secret from .env) -> COGNITO_* in .env
-│   ├── deploy-reports.sh         # weekly-report stack (+ mailer zip); --image-only follows the backend
+│   ├── deploy-functions.sh       # new code for the parser, builder (image) and mailer (zip)
 │   ├── reports.sh                # queue a report, list/get reports, logs, queues, test helpers
 │   └── github-role.sh            # the OIDC role CI assumes to deploy
 │
@@ -550,11 +554,12 @@ that `make deploy-backend` just wrote. The role's `deploy-frontend` policy cover
 ## 14. Sign-in with Cognito
 
 ```bash
-make deploy-auth        # once the Google OAuth client exists: user pool, Google, managed login
-make deploy-frontend    # rebuild the site with the auth stack's public outputs
+make infra-plan         # changes go through a pull request; HCP Terraform applies after the merge
+make deploy-frontend    # rebuild the site with Terraform's public sign-in outputs
 ```
 
-`infra/auth.yaml` is the whole sign-in setup in one stack (`peach-auth`):
+`infra/auth.tf` is the whole sign-in setup (Terraform since Lab 7, section 18; it was the
+CloudFormation stack `peach-auth`):
 
 ```
 browser -> /login/ -> Cognito managed login (email + password, or Continue with Google)
@@ -566,7 +571,7 @@ browser -> /login/ -> Cognito managed login (email + password, or Continue with 
   allows about 50 emails a day.
 - **Google identity provider**: Cognito federates to Google; the site never talks to Google.
   `email` and `email_verified` are mapped, so a Google user arrives with an email to show.
-- **Web client**: public (`GenerateSecret: false`), code flow, scopes `openid email profile`,
+- **Web client**: public (no client secret), code flow, scopes `openid email profile`,
   providers `COGNITO` and `Google`. Callback URLs are `<site>/login/` and
   `http://localhost:3000/login/`; logout URLs are `<site>/` and `http://localhost:3000/`. They
   must match exactly, trailing slash included.
@@ -580,20 +585,19 @@ session and then goes through Cognito's `/logout` (Cognito has no OIDC end-sessi
 `next.config.ts` keeps `trailingSlash` off: the export writes `login.html`, and the CloudFront
 Function already serves it for `/login/`.
 
-**The values are public and come from the stack.** `make deploy-frontend` reads the auth stack's
-`Authority`, `ClientId` and `HostedDomainUrl` outputs and compiles them in as
-`NEXT_PUBLIC_COGNITO_*`, the same way as the API URL; CI reads them the same way.
-`make deploy-auth` also writes them to `.env` as `COGNITO_*`, which Compose passes to the dev
-server.
+**The values are public and come from Terraform.** `make deploy-frontend` reads the
+`cognito_authority`, `cognito_client_id` and `cognito_domain` outputs (`make infra-output`) and
+compiles them in as `NEXT_PUBLIC_COGNITO_*`, the same way as the API URL. CI cannot read the
+Terraform state, so it gets the same values from the repository variables `COGNITO_AUTHORITY`,
+`COGNITO_CLIENT_ID` and `COGNITO_DOMAIN`. For the dev server, put them in `.env` as `COGNITO_*`.
 
-**The Google client secret never leaves `.env` and Cognito.** Create the Google OAuth client
-first (Google Auth Platform: External, scopes `openid`, `email` and `profile` only, published
-*In production*; a Web application client whose JavaScript origin is
+**The Google client secret lives only in HCP Terraform and Cognito.** Create the Google OAuth
+client first (Google Auth Platform: External, scopes `openid`, `email` and `profile` only,
+published *In production*; a Web application client whose JavaScript origin is
 `https://peach-melasya.auth.us-east-1.amazoncognito.com` and whose redirect URI is that origin
-plus `/oauth2/idpresponse`), and put `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in the
-gitignored `.env`. `make deploy-auth` hands the secret to CloudFormation as a `NoEcho` parameter
-through a `0600` file that is deleted on exit (`auth-params.json`, also gitignored). It is not in
-the repository, not in GitHub, and not in the frontend build. CI never deploys this stack.
+plus `/oauth2/idpresponse`). The client ID is in `infra/terraform.tfvars`; the secret is the
+workspace's sensitive variable `google_client_secret` - not in the repository, not in GitHub, not
+in the frontend build. It is in the Terraform state, which HCP Terraform encrypts (ADR 0008).
 
 ## 15. Weekly meetings report
 
@@ -607,8 +611,8 @@ EventBridge Scheduler (Monday 07:00 Europe/Kyiv)
   -> SES
 ```
 
-`infra/reports.yml` (stack `peach-reports`) holds all of it; nothing in the backend stack or the
-database changes. The data lives in `meetings` and `meeting_participants` (migration `0003`), and
+`infra/reports.tf` holds all of it (Terraform since Lab 7; it was the stack `peach-reports`);
+nothing in the backend stack or the database changes. The data lives in `meetings` and `meeting_participants` (migration `0003`), and
 `app/reports/weekly.py` builds the CSV: one ISO week against the week before (meeting count, total
 hours, differences) and its five longest meetings. Weeks run Monday 00:00 to Monday 00:00 in
 Europe/Kyiv, and a meeting belongs to the week it starts in.
@@ -627,7 +631,7 @@ Europe/Kyiv, and a meeting belongs to the week it starts in.
   can only read `reports/*` and send as `REPORT_SENDER`; it never writes to S3 or touches RDS.
 
 ```bash
-make deploy-reports              # needs REPORT_SENDER / REPORT_RECIPIENTS in .env
+make deploy-functions            # new builder image / mailer zip (configuration is Terraform's)
 make report-now WEEK=2026-W39    # queue a request on SQS (no WEEK: last complete week)
 make reports-ls                  # list reports/
 make reports-logs                # schedule / sqs / s3 trigger lines from both functions
@@ -644,15 +648,16 @@ itself requires `"confirm": true` and is unreachable from the function URL.
 
 **Deploy order.** The builder runs the backend image, so the image must contain `app/reports`
 and production must be at migration `0003`: deploy the backend (CI does, on push) before
-`make deploy-reports`. While SES is in the sandbox, the sender and every recipient must be
-verified identities (`aws sesv2 create-email-identity`, then click the emailed link) - the stack
-never creates identities. The mailer zip goes to a private `<project>-artifacts-<account>-<region>`
-bucket the script creates, like the ECR repository, outside the stack.
+`make deploy-functions`. While SES is in the sandbox, the sender and every recipient must be
+verified identities (`aws sesv2 create-email-identity`, then click the emailed link) - Terraform
+never creates identities. `REPORT_SENDER` and `REPORT_RECIPIENTS` are the workspace variables
+`report_sender` and `report_recipients`. The mailer zip lives in a private
+`<project>-artifacts-<account>-<region>` bucket, like the ECR repository, outside Terraform.
 
-**Keeping the builder on the current image.** CloudFormation pins the builder to the image it was
-deployed with, and the ECR lifecycle keeps only the last three images, so after a few backend
-deploys the builder's image would be deleted. `scripts/deploy-reports.sh --image-only` points the
-builder at `peach-backend`'s current image and changes nothing else.
+**Keeping the builder on the current image.** The ECR lifecycle keeps only the last three images,
+so after a few backend deploys the builder's image would be deleted. `make deploy-functions`
+points the builder and the parser at `peach-backend`'s current image and uploads the mailer zip;
+Terraform ignores image and zip (`ignore_changes`), so code and configuration never fight.
 
 ### Test plan
 
@@ -675,14 +680,14 @@ Use two different weeks so the two required files are distinct objects.
    builder fails three times, 360 s apart, then `make reports-queues` shows it in the DLQ;
    `scripts/reports.sh dlq` shows it, `scripts/reports.sh dlq-purge --yes` clears it.
 5b. **Fix and redrive.** A poison message (bad input) stays bad, so the redrive demonstration uses
-   a valid request and a test-only outage: `scripts/deploy-reports.sh --simulate-failure` sets
-   `REPORTS_SIMULATE_FAILURE=true` on the builder, which then fails every *valid* request after
-   validation and before touching RDS or S3 (a bad week is still rejected as before). Queue one
-   request (`scripts/reports.sh now 2026-W39`), let it reach the DLQ, then "fix the builder" with a
-   plain `scripts/deploy-reports.sh` and use **Start DLQ redrive** on the DLQ in the SQS console:
-   the request returns, succeeds, writes `reports/2026-W39.csv` and sends one email. The switch is
-   only ever set by that command-line flag - never from `.env` - and every other deploy, including
-   `--image-only`, sets it back to `false`; the stack output `SimulateBuilderFailure` shows it.
+   a valid request and a test-only outage: the Terraform variable `simulate_builder_failure =
+   true` (a pull request, applied by HCP Terraform) sets `REPORTS_SIMULATE_FAILURE=true` on the
+   builder, which then fails every *valid* request after validation and before touching RDS or S3
+   (a bad week is still rejected as before). Queue one request (`scripts/reports.sh now
+   2026-W39`), let it reach the DLQ, then "fix the builder" by reverting the variable and use
+   **Start DLQ redrive** on the DLQ in the SQS console: the request returns, succeeds, writes
+   `reports/2026-W39.csv` and sends one email. It defaults to `false`, when the variable is absent
+   from the function altogether; the output `reports_simulate_failure` shows it.
 6. **Duplicate emails.** Rebuilding a week overwrites the same key - one object, but every
    successful write is a new ObjectCreated event, so each rebuild sends another email. The same
    happens if a builder writes the file and then fails before returning (the retry writes it
@@ -701,7 +706,7 @@ Use two different weeks so the two required files are distinct objects.
        -> RDS, with ai_suggestion / ai_model / ai_prompt_version / created_by
 ```
 
-- **Parser** (`backend/app/ai/`, stack `peach-ai` in `infra/ai.yml`). It runs the backend image
+- **Parser** (`backend/app/ai/`, `infra/ai.tf`; was the stack `peach-ai`). It runs the backend image
   with the command `app.ai.lambda_handler.handler`. It runs outside the VPC (it reaches the
   Gemini API and SSM without a NAT gateway) and never imports the database layer.
   - Model: `PARSER_MODEL` (default `gemini-3.5-flash-lite`, Google's official `google-genai` SDK).
@@ -735,7 +740,8 @@ Use two different weeks so the two required files are distinct objects.
   - **Every meetings endpoint needs `Authorization: Bearer <Cognito access token>`.** Without
     one, or with an invalid one, the answer is 401; with sign-in not configured, 503.
   - The API Lambda has no internet access, so `deploy-backend.sh` fetches the user pool's
-    public signing keys from `peach-auth` at deploy time and pins them in `COGNITO_JWKS`.
+    public signing keys from the user pool (Terraform's `cognito_authority` output, or
+    `COGNITO_AUTHORITY` in CI) at deploy time and pins them in `COGNITO_JWKS`.
     Redeploy the backend if Cognito rotates its keys. Locally, Compose passes
     `COGNITO_AUTHORITY` and `COGNITO_CLIENT_ID` from `.env`, and the backend fetches the keys.
   - `created_by` is the token's `sub`; a request body cannot set it.
@@ -754,8 +760,8 @@ make llm-hello                   # one tiny Gemini call: do the key and the mode
 make parse DRY_RUN=1             # print the request for the sample agenda, no call, no key
 make parse                       # parse backend/app/ai/examples/sample-agenda.txt (one call)
 make parse FILE=path/in/backend/agenda.txt
-make deploy-ai                   # stack peach-ai; writes PARSER_URL to .env
-make deploy-frontend             # rebuilds the site with NEXT_PUBLIC_PARSER_URL
+make deploy-functions            # new parser image (configuration is infra/ai.tf)
+make deploy-frontend             # rebuilds the site with NEXT_PUBLIC_PARSER_URL (output parser_url)
 ```
 
 **The Gemini API key stays on the backend.** It is never in code, in git, in a log line, in a
@@ -764,9 +770,9 @@ make deploy-frontend             # rebuilds the site with NEXT_PUBLIC_PARSER_URL
   `make llm-hello` source `.env` and hand only that variable to the container, by name.
 - *On Lambda:* create an SSM Parameter Store **SecureString** named `/peach/gemini-api-key`
   yourself (console, or `aws ssm put-parameter --type SecureString` reading the value from a
-  file, not typed on the command line). The stack receives only the name; the function reads
-  and decrypts the value once per container. `deploy-ai.sh` checks the parameter exists with
-  `describe-parameters`, which never returns the value. A standard parameter is free.
+  file, not typed on the command line). Terraform knows only the name
+  (`gemini_api_key_parameter`), so the key is not in the Terraform state either; the function
+  reads and decrypts the value once per container. A standard parameter is free.
 - *Privacy:* on Gemini's free tier Google may use what is sent to improve its products. Paste
   only test agendas (fictional names, `@example.com` addresses), never real personal data.
 
@@ -777,8 +783,8 @@ Each call is free on the free tier and a fraction of a cent on the paid tier. De
 **Deploy order:**
 1. Push. CI deploys the backend image and applies migration `0004`.
 2. Create the SSM SecureString `/peach/gemini-api-key` (once).
-3. `make deploy-ai`. It reads the image from `peach-backend`, the issuer and client ID from
-   `peach-auth`, and the site URL from `peach-frontend` for CORS.
+3. Change `infra/ai.tf` through a pull request; HCP Terraform applies it after the merge.
+   `make deploy-functions` moves the parser to the backend's current image.
 4. `make deploy-frontend`.
 
 ### Test plan
@@ -816,3 +822,65 @@ The deliberate gaps, left for later:
 - authorization on items: only the meetings API checks the sign-in;
 - per-user or per-organisation access (multi-tenancy) and closed sign-up;
 - background workers.
+
+## 18. Infrastructure as code (Terraform)
+
+Since Lab 7 the infrastructure from Labs 4-6 - sign-in, the weekly report and the agenda parser -
+is Terraform in `infra/*.tf`, with its state in HCP Terraform. It was three CloudFormation stacks
+(`peach-auth`, `peach-reports`, `peach-ai`); their resources were adopted with `import` blocks, not
+re-created, so every account, report, queue and URL is the same. The older stacks (`backend.yaml`,
+`frontend.yaml`, `github-oidc.yaml`) stay CloudFormation. Why, and the trade-offs:
+[ADR 0008](docs/adr/0008-terraform.md).
+
+**Two roads.** The GitHub Actions workflow (section 13) deploys the application - the backend image
+and the static site. HCP Terraform deploys the infrastructure: workspace `peach-dev`, working
+directory `infra`, connected to this repository.
+
+```
+pull request -> HCP Terraform plan (a check on the PR) -> review the plan -> merge
+             -> HCP Terraform apply, with short-lived AWS credentials (OIDC, no stored keys)
+```
+
+There is no `terraform apply` in the Makefile. Locally:
+
+```bash
+terraform login        # once: an HCP Terraform API token in your user profile
+make infra-init        # terraform -chdir=infra init against the workspace
+make infra-plan        # a speculative plan in HCP Terraform; it never applies
+make infra-output      # public outputs: user pool, client, domain, parser URL, report queue...
+```
+
+When a change needs both roads - say, a new environment variable for the parser - apply the
+infrastructure first with a value the running code ignores, then deploy the code that reads it.
+Undo it in the opposite order.
+
+**Code versus configuration.** Terraform owns each function's configuration (memory, timeout,
+environment, role, triggers). The code - the backend image for the parser and the builder, the
+mailer zip - is application, shipped by `make deploy-functions`; Terraform ignores it
+(`ignore_changes`).
+
+**Where the values live.**
+- `infra/terraform.tfvars` - non-secret values (IDs of the backend's network, the Google client ID).
+- Workspace variables in HCP Terraform - `google_client_secret` (sensitive), `report_sender`,
+  `report_recipients`, plus `TFC_AWS_PROVIDER_AUTH=true`, `TFC_AWS_PLAN_ROLE_ARN` and
+  `TFC_AWS_APPLY_ROLE_ARN` (environment variables).
+- The Terraform state - every attribute, including the Google client secret and the builder's
+  `DATABASE_URL`. HCP Terraform encrypts it; nobody downloads it. The Gemini API key is not in it:
+  Terraform only knows the SSM parameter's name.
+- GitHub repository variables `COGNITO_AUTHORITY`, `COGNITO_CLIENT_ID`, `COGNITO_DOMAIN` and
+  `PARSER_URL` - public values the deploy job needs and cannot read from the state.
+
+**The bootstrap.** `infra/bootstrap/` creates what HCP Terraform needs before it can do anything:
+an IAM OIDC provider for `app.terraform.io` and two roles, one per run phase. Each trusts only
+workspace `peach-dev` of the organization, and only its own phase. The plan role can read (plus the
+one database secret infra/ reads); the apply role can also write, but only `peach-*` resources of
+the kinds infra/ manages. It is applied once from a laptop, with a local, gitignored state:
+
+```bash
+terraform -chdir=infra/bootstrap init
+terraform -chdir=infra/bootstrap apply -var tfc_organization=<your organization>
+```
+
+**Drift.** A change made in the console shows up in the next plan, and an apply puts the code's
+version back. A real 23:00 fix has to become a pull request the next morning, or the next apply
+undoes it.
