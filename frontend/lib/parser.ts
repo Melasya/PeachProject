@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/* The agenda parser: a separate function URL (make deploy-ai), compiled in at
+/* The agenda parser: a separate function URL (infra/ai.tf), compiled in at
  * build time like the API URL. Empty means AI parsing is off in this build. */
 export const parserUrl = (process.env.NEXT_PUBLIC_PARSER_URL ?? "").replace(
   /\/$/,

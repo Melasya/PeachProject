@@ -62,11 +62,11 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       INTERNAL_API_URL: ${INTERNAL_API_URL:-http://backend:8000}
-      # Public sign-in settings from make deploy-auth; empty hides sign-in.
+      # Public sign-in settings (make infra-output); empty hides sign-in.
       NEXT_PUBLIC_COGNITO_AUTHORITY: ${COGNITO_AUTHORITY:-}
       NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
       NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
-      # The agenda parser's URL from make deploy-ai; empty disables parsing.
+      # The agenda parser's URL (make infra-output); empty disables parsing.
       NEXT_PUBLIC_PARSER_URL: ${PARSER_URL:-}
       NODE_ENV: production
     ports:
