@@ -1,0 +1,54 @@
+# Lab 8, Part 3: a one-node Redpanda (Kafka-compatible broker) and its web console.
+# Separate from the Peach compose project, so it never touches the app's containers.
+name: lab8-streaming
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    command:
+      - redpanda
+      - start
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # Containers reach the broker as redpanda:9092, Python on the host as localhost:19092.
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+    ports:
+      - "19092:19092"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  # Creates the topic once the broker is healthy, with exactly three partitions.
+  create-topic:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.18
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        rpk topic create payments --partitions 3 --replicas 1 --brokers redpanda:9092
+        || true;
+        rpk topic describe payments --brokers redpanda:9092
+    restart: "no"
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.7.2
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8080:8080"
+
+volumes:
+  redpanda-data:

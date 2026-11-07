@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Lab 8, Part 4. Python producer -> Kinesis Data Streams -> Amazon Data Firehose -> S3 -> Glue Data
+  Catalog -> Athena, plus Kinesis -> Lambda failure-rate check -> SNS alert. Isolated from Peach:
+  every resource is named ooad-lab8-* and is deleted with this stack. The data bucket is not part of
+  the stack, so delivered objects survive for the evidence.
+
+Parameters:
+  DataBucket:
+    Type: String
+    Default: ooad-lab8-melasya
+  AlertEmail:
+    Type: String
+    Description: Receives the failure-rate alerts; the subscription must be confirmed from the email.
+  AlertThreshold:
+    Type: String
+    Default: "0.10"
+  MinimumSample:
+    Type: Number
+    Default: 20
+    Description: Finished payments a batch needs per method before its rate is judged.
+
+Resources:
+  # One provisioned shard: 1 MB/s or 1,000 records/s, far above the bounded sample's 20 events/s,
+  # and the cheapest mode at $0.015 per hour. On-demand would be $0.04 per hour.
+  Stream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: ooad-lab8-payments
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+      ShardCount: 1
+      RetentionPeriodHours: 24
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  # --- Firehose to S3 ----------------------------------------------------------
+
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/kinesisfirehose/ooad-lab8
+      RetentionInDays: 3
+
+  FirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: delivery
+
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ooad-lab8-firehose
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: firehose.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-stream-write-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [kinesis:DescribeStream, kinesis:GetShardIterator, kinesis:GetRecords, kinesis:ListShards]
+                Resource: !GetAtt Stream.Arn
+              - Effect: Allow
+                Action: [s3:PutObject, s3:AbortMultipartUpload, s3:GetBucketLocation, s3:ListBucket, s3:ListBucketMultipartUploads]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:s3:::${DataBucket}"
+                  - !Sub "arn:${AWS::Partition}:s3:::${DataBucket}/stream/*"
+                  - !Sub "arn:${AWS::Partition}:s3:::${DataBucket}/stream-errors/*"
+              - Effect: Allow
+                Action: logs:PutLogEvents
+                Resource: !GetAtt FirehoseLogGroup.Arn
+
+  Firehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: ooad-lab8-to-s3
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt Stream.Arn
+        RoleARN: !GetAtt FirehoseRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !Sub "arn:${AWS::Partition}:s3:::${DataBucket}"
+        RoleARN: !GetAtt FirehoseRole.Arn
+        # Hive-style prefix: the Glue table below finds each day through partition projection.
+        Prefix: "stream/dt=!{timestamp:yyyy-MM-dd}/"
+        ErrorOutputPrefix: "stream-errors/!{firehose:error-output-type}/"
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 1
+        CompressionFormat: UNCOMPRESSED
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: !Ref FirehoseLogStream
+
+  # --- Glue Data Catalog -------------------------------------------------------
+
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: lab8_stream
+
+  # The same columns as lab8.payment_events; no crawler needed, partition projection finds the days.
+  Table:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: stream_events
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.dt.type: date
+          projection.dt.format: yyyy-MM-dd
+          projection.dt.range: 2026-11-01,NOW
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: DAYS
+          storage.location.template: !Sub "s3://${DataBucket}/stream/dt=${!dt}/"
+        PartitionKeys:
+          - { Name: dt, Type: string }
+        StorageDescriptor:
+          Location: !Sub "s3://${DataBucket}/stream/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - { Name: invoiceid, Type: string }
+            - { Name: status, Type: string }
+            - { Name: failurereason, Type: string }
+            - { Name: amount, Type: bigint }
+            - { Name: finalamount, Type: bigint }
+            - { Name: ccy, Type: int }
+            - { Name: reference, Type: string }
+            - { Name: createddate, Type: string }
+            - { Name: modifieddate, Type: string }
+            - { Name: receivedat, Type: string }
+            - { Name: merchantid, Type: string }
+            - { Name: merchantname, Type: string }
+            - { Name: mcc, Type: int }
+            - { Name: customerid, Type: string }
+            - { Name: paymentmethod, Type: string }
+            - { Name: device, Type: string }
+
+  # --- Lambda failure-rate check -> SNS -----------------------------------------
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ooad-lab8-failure-rate
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref AlertEmail }
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  CheckRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ooad-lab8-failure-check
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: read-stream-publish-alert
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [kinesis:DescribeStream, kinesis:DescribeStreamSummary, kinesis:GetShardIterator, kinesis:GetRecords, kinesis:ListShards]
+                Resource: !GetAtt Stream.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+
+  CheckLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/ooad-lab8-failure-check
+      RetentionInDays: 3
+
+  # Kept identical to lambda/failure_check.py, which has the unit tests: deploy.sh renders it here.
+  CheckFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CheckLogGroup
+    Properties:
+      FunctionName: ooad-lab8-failure-check
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt CheckRole.Arn
+      Environment:
+        Variables:
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          ALERT_THRESHOLD: !Ref AlertThreshold
+          MINIMUM_SAMPLE: !Ref MinimumSample
+      Code:
+        ZipFile: |
+          #LAMBDA_SOURCE#
+
+  # Up to 500 records or 30 s per invocation: about one check per half minute.
+  CheckMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt Stream.Arn
+      FunctionName: !Ref CheckFunction
+      StartingPosition: TRIM_HORIZON
+      BatchSize: 500
+      MaximumBatchingWindowInSeconds: 30
+      MaximumRetryAttempts: 2
+      BisectBatchOnFunctionError: true
+
+Outputs:
+  StreamName:
+    Value: !Ref Stream
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  AthenaTable:
+    Value: lab8_stream.stream_events

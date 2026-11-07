@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Lab 8, Part 4, the deployed alternative. Python producer -> SQS -> Lambda -> S3 -> Glue Data Catalog
+  -> Athena, and Lambda -> SNS for failure-rate alerts. NOT equivalent to the requested Kinesis +
+  Firehose, which this Free Plan account cannot use (see ../cloud/ for that reference design). All
+  resources are named ooad-lab8-* and leave with this stack; delivered objects stay in the Lab 8 bucket.
+
+Parameters:
+  DataBucket:
+    Type: String
+    Default: ooad-lab8-melasya
+  CodeKey:
+    Type: String
+    Description: Key of the function's zip in DataBucket; named after its hash.
+  AlertThreshold:
+    Type: String
+    Default: "0.10"
+  MinimumSample:
+    Type: Number
+    Default: 20
+    Description: Finished payments a batch needs per method before its rate is judged.
+
+Resources:
+  # --- the queue, instead of a stream ------------------------------------------
+
+  EventsDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ooad-lab8-events-dlq
+      MessageRetentionPeriod: 345600
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  # Standard queue: at-least-once delivery and no ordering guarantee. A message is gone once a
+  # batch succeeds, so there is no replay, unlike Kafka or Kinesis.
+  EventsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ooad-lab8-events
+      # AWS requires at least 6 x the function's timeout for a Lambda trigger.
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 86400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt EventsDeadLetterQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  # --- alerts ------------------------------------------------------------------
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ooad-lab8-failure-rate
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  # A queue subscribed to the topic: proof, readable from the CLI, that SNS really delivered an alert.
+  AlertSinkQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ooad-lab8-alert-sink
+      MessageRetentionPeriod: 345600
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  AlertSinkPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref AlertSinkQueue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt AlertSinkQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref AlertTopic
+
+  AlertSinkSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AlertSinkQueue.Arn
+      RawMessageDelivery: true
+
+  # --- the function ------------------------------------------------------------
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ooad-lab8-sqs-to-s3
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: read-queue-write-objects-publish-alert
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt EventsQueue.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${DataBucket}/sqs-stream/*"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: /aws/lambda/ooad-lab8-sqs-to-s3
+      RetentionInDays: 7
+
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: FunctionLogGroup
+    Properties:
+      FunctionName: ooad-lab8-sqs-to-s3
+      Description: Lab 8 - writes a batch of SQS events to S3 and checks the failure rate
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: handler.handler
+      Timeout: 30
+      MemorySize: 128
+      Role: !GetAtt FunctionRole.Arn
+      Code:
+        S3Bucket: !Ref DataBucket
+        S3Key: !Ref CodeKey
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          ALERT_THRESHOLD: !Ref AlertThreshold
+          MINIMUM_SAMPLE: !Ref MinimumSample
+      Tags:
+        - { Key: Project, Value: ooad-lab8 }
+
+  # At most 2 concurrent invocations: this account's Lambda limit is only 10, shared with Peach's
+  # functions, and this lab must never take capacity from them.
+  Trigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt EventsQueue.Arn
+      FunctionName: !Ref Function
+      BatchSize: 500
+      MaximumBatchingWindowInSeconds: 30
+      ScalingConfig:
+        MaximumConcurrency: 2
+
+  # --- Glue Data Catalog -------------------------------------------------------
+
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: lab8_sqs
+
+  # The raw table's columns. No crawler needed: partition projection works out each day's location.
+  Table:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: stream_events
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          projection.enabled: "true"
+          projection.dt.type: date
+          projection.dt.format: yyyy-MM-dd
+          projection.dt.range: 2026-11-01,NOW
+          projection.dt.interval: "1"
+          projection.dt.interval.unit: DAYS
+          storage.location.template: !Sub "s3://${DataBucket}/sqs-stream/dt=${!dt}/"
+        PartitionKeys:
+          - { Name: dt, Type: string }
+        StorageDescriptor:
+          Location: !Sub "s3://${DataBucket}/sqs-stream/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Columns:
+            - { Name: invoiceid, Type: string }
+            - { Name: status, Type: string }
+            - { Name: failurereason, Type: string }
+            - { Name: amount, Type: bigint }
+            - { Name: finalamount, Type: bigint }
+            - { Name: ccy, Type: int }
+            - { Name: reference, Type: string }
+            - { Name: createddate, Type: string }
+            - { Name: modifieddate, Type: string }
+            - { Name: receivedat, Type: string }
+            - { Name: merchantid, Type: string }
+            - { Name: merchantname, Type: string }
+            - { Name: mcc, Type: int }
+            - { Name: customerid, Type: string }
+            - { Name: paymentmethod, Type: string }
+            - { Name: device, Type: string }
+
+Outputs:
+  QueueUrl:
+    Value: !Ref EventsQueue
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  AlertSinkQueueUrl:
+    Value: !Ref AlertSinkQueue
+  AthenaTable:
+    Value: lab8_sqs.stream_events
